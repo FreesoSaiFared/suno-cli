@@ -155,8 +155,8 @@ pub struct FilterPresence {
 
 #[derive(Debug, Serialize)]
 pub struct GenerateRequest {
-    /// Captcha/anti-bot token. Always serialized as `null` from the CLI; the
-    /// real validation happens via `metadata.create_session_token`.
+    /// Captcha/anti-bot token. Generation normally needs a fresh hCaptcha
+    /// response from the browser-backed solver unless the caller supplies one.
     pub token: Option<String>,
     pub generation_type: String,
     pub title: Option<String>,

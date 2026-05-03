@@ -4,8 +4,11 @@ use crate::errors::CliError;
 
 impl SunoClient {
     pub async fn billing_info(&self) -> Result<BillingInfo, CliError> {
-        let resp = self.get("/api/billing/info/").send().await?;
-        let resp = self.check_response(resp).await?;
-        Ok(resp.json().await?)
+        self.with_auth_retry(|| async {
+            let resp = self.get("/api/billing/info/").send().await?;
+            let resp = self.check_response(resp).await?;
+            Ok(resp.json().await?)
+        })
+        .await
     }
 }

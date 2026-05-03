@@ -12,11 +12,9 @@
 - **JWT lifetime**: ~1 hour. Auto-refreshed by Clerk SDK in browser.
 - **Clerk session ID**: Found in JWT `sid` claim (e.g., `session_eece6e4f36131cbcb12aeb`)
 
-## Account — Premier Plan
-- Credits: 10,755 total remaining
-- Monthly: 45/10,000 used
-- Period ends: 2026-05-01
-- Features: v4, cover, edit_mode, persona, stems, negative_tags, remaster, video, custom_models, etc.
+## Account Response
+- `/api/billing/info/` returns the active plan, remaining credits, usage period, feature flags, model list, and model limits.
+- Do not commit live account-specific credit balances to this file; they drift quickly and are not useful as implementation evidence.
 
 ## Models (from /api/billing/info/)
 
@@ -60,8 +58,8 @@ Returns full account info, credits, plan, models, features, limits.
 }
 ```
 
-### POST /api/generate/v2/
-**Generate music**. Payload (from gcui-art/suno-api source):
+### POST /api/generate/v2-web/
+**Generate music**. Payload shape captured from the current web route and represented by `src/api/types.rs::GenerateRequest`:
 ```json
 {
   "make_instrumental": false,
@@ -70,20 +68,23 @@ Returns full account info, credits, plan, models, features, limits.
   "generation_type": "TEXT",
   "continue_at": null,
   "continue_clip_id": null,
-  "task": null,
+  "metadata": {
+    "web_client_pathname": "/create",
+    "create_mode": "custom",
+    "create_session_token": "<uuid>"
+  },
   "token": "<captcha_token>",
-  "gpt_description_prompt": "a happy pop song about summer",
   "tags": "pop, upbeat, synths",
   "title": "Summer Vibes",
   "negative_tags": "metal, heavy, dark"
 }
 ```
 
-**IMPORTANT**: Requires `token` field (captcha). gcui-art uses Playwright to intercept browser captcha flow.
+**IMPORTANT**: Some accounts/flows require a fresh hCaptcha `token` field. The Rust CLI uses a piloted Chrome path when needed and also accepts `--token` for externally supplied solutions.
 
 **Two modes**:
-1. **Description mode** (`gpt_description_prompt` set, `prompt` empty) — Suno writes lyrics from description
-2. **Custom mode** (`prompt` = lyrics, `tags` + `title` + `negative_tags` set)
+1. **Description mode** (`metadata.create_mode = "inspiration"`, `prompt` is the description) — Suno writes lyrics from description
+2. **Custom mode** (`metadata.create_mode = "custom"`, `prompt` = lyrics, `tags` + `title` + `negative_tags` set)
 
 **Response**: `{"clips": [...], "metadata": {...}, "status": "..."}`
 

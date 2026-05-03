@@ -56,6 +56,20 @@ impl SunoClient {
                         return Err(CliError::AuthExpired);
                     }
                 }
+            } else if let Some(cookie) = &auth.clerk_client_cookie {
+                eprintln!("JWT expired, recovering Clerk session...");
+                match auth::clerk_token_exchange(&client, cookie).await {
+                    Ok((session_id, jwt)) => {
+                        auth.session_id = Some(session_id);
+                        auth.jwt = Some(jwt);
+                        auth.save()?;
+                        eprintln!("JWT refreshed successfully");
+                    }
+                    Err(e) => {
+                        eprintln!("JWT refresh failed: {e}");
+                        return Err(CliError::AuthExpired);
+                    }
+                }
             } else {
                 return Err(CliError::AuthExpired);
             }
@@ -124,13 +138,21 @@ impl SunoClient {
                 auth.clerk_client_cookie
                     .clone()
                     .ok_or(CliError::AuthExpired)?,
-                auth.session_id.clone().ok_or(CliError::AuthExpired)?,
+                auth.session_id.clone(),
             )
         };
-        let jwt = auth::clerk_refresh_jwt(&self.client, &cookie, &session_id).await?;
+        let (session_id, jwt) = if let Some(session_id) = session_id {
+            (
+                session_id.clone(),
+                auth::clerk_refresh_jwt(&self.client, &cookie, &session_id).await?,
+            )
+        } else {
+            auth::clerk_token_exchange(&self.client, &cookie).await?
+        };
         // Re-lock briefly to write the new JWT and persist.
         {
             let mut auth = self.auth.lock().expect("auth mutex poisoned");
+            auth.session_id = Some(session_id);
             auth.jwt = Some(jwt);
             auth.save()?;
         }
@@ -165,6 +187,9 @@ impl SunoClient {
         }
         if status == 403 {
             let body = resp.text().await.unwrap_or_default();
+            if looks_like_auth_expired(&body) {
+                return Err(CliError::AuthExpired);
+            }
             return Err(CliError::Api {
                 code: "forbidden",
                 message: format!("HTTP 403 Forbidden: {body}"),
@@ -183,7 +208,7 @@ impl SunoClient {
             // even when the JWT's own `exp` claim is still valid. We treat
             // it as `AuthExpired` so the next CLI invocation will refresh
             // via the Clerk session cookie and pick up a fresh token.
-            if body.contains("Token validation failed") {
+            if looks_like_auth_expired(&body) {
                 return Err(CliError::AuthExpired);
             }
             if body.contains("'loc': ['body', 'params'")
@@ -203,4 +228,15 @@ impl SunoClient {
         }
         Ok(resp)
     }
+}
+
+fn looks_like_auth_expired(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("token validation failed")
+        || lower.contains("jwt expired")
+        || lower.contains("jwt is expired")
+        || lower.contains("invalid jwt")
+        || lower.contains("invalid token")
+        || lower.contains("not authenticated")
+        || lower.contains("unauthenticated")
 }

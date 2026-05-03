@@ -72,7 +72,7 @@ async fn ensure_chrome_running() -> Result<(), CliError> {
     // NOTE: do NOT use --headless. hCaptcha's bot-detection trips on headless
     // mode and returns "challenge-expired". We run a real headed Chrome but
     // shove it far offscreen + give it a 1x1 window so the user never sees it.
-    let child = Command::new(&chrome_path)
+    let mut child = Command::new(&chrome_path)
         .arg(format!("--remote-debugging-port={CDP_PORT}"))
         .arg(format!("--user-data-dir={}", profile_dir.display()))
         .arg("--no-first-run")
@@ -87,6 +87,7 @@ async fn ensure_chrome_running() -> Result<(), CliError> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| CliError::Config(format!("failed to spawn Chrome at {chrome_path:?}: {e}")))?;
+    drain_stderr(&mut child);
 
     {
         let mut slot = chrome_slot().lock().await;
@@ -102,13 +103,24 @@ async fn ensure_chrome_running() -> Result<(), CliError> {
     }
 
     Err(CliError::Config(
-        "Chrome was spawned but never opened the CDP port. Try `suno chrome-launch` for a visible Chrome window.".into(),
+        "Chrome was spawned but never opened the CDP port. Check that Chrome can start normally, or set SUNO_CHROME_PATH to a Chrome/Chromium binary.".into(),
     ))
 }
 
 /// Locate a Chrome binary on the host. Looks in the usual macOS / Linux /
 /// Windows install paths and falls back to `$PATH`.
 fn locate_chrome() -> Result<String, CliError> {
+    if let Ok(path) = std::env::var("SUNO_CHROME_PATH")
+        && !path.trim().is_empty()
+    {
+        if std::path::Path::new(&path).exists() {
+            return Ok(path);
+        }
+        return Err(CliError::Config(format!(
+            "SUNO_CHROME_PATH points to a missing file: {path}"
+        )));
+    }
+
     let candidates: &[&str] = if cfg!(target_os = "macos") {
         &[
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -248,7 +260,7 @@ async fn cdp_call(
 ) -> Result<serde_json::Value, CliError> {
     let req = CdpReq { id, method, params };
     let payload = serde_json::to_string(&req).unwrap();
-    ws.send(Message::Text(payload.into()))
+    ws.send(Message::Text(payload))
         .await
         .map_err(|e| CliError::Config(format!("CDP ws send {method}: {e}")))?;
     loop {
@@ -281,7 +293,7 @@ async fn cdp_call(
 /// Connect to the page websocket, inject cookies, navigate to suno.com/create
 /// if needed, then render an invisible hCaptcha widget and call
 /// `hcaptcha.execute()` to obtain a token.
-async fn render_and_execute(ws_url: &str, _auth: &AuthState) -> Result<String, CliError> {
+async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, CliError> {
     let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
         .await
         .map_err(|e| CliError::Config(format!("CDP ws connect: {e}")))?;
@@ -298,7 +310,7 @@ async fn render_and_execute(ws_url: &str, _auth: &AuthState) -> Result<String, C
 
     // Inject cookies fresh from rookie every time so we always have the
     // latest from the user's main Chrome.
-    let cookies = extract_cookies()?;
+    let cookies = extract_cookies(auth)?;
     if !cookies.is_empty() {
         cdp_call(
             &mut ws,
@@ -423,7 +435,11 @@ async fn render_and_execute(ws_url: &str, _auth: &AuthState) -> Result<String, C
 
 /// Pull the user's Suno cookies from their main Chrome via `rookie`.
 /// Returns them in CDP `Network.CookieParam` shape.
-fn extract_cookies() -> Result<Vec<CdpCookie>, CliError> {
+fn extract_cookies(auth: &AuthState) -> Result<Vec<CdpCookie>, CliError> {
+    if let Some(cookie_header) = auth.cookie.as_deref().filter(|c| !c.trim().is_empty()) {
+        return Ok(cookies_from_header(cookie_header));
+    }
+
     let domains: Vec<String> = vec![
         "suno.com".into(),
         "auth.suno.com".into(),
@@ -432,14 +448,23 @@ fn extract_cookies() -> Result<Vec<CdpCookie>, CliError> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    let raw_cookies = match rookie::chrome(Some(domains)) {
-        Ok(cs) => cs,
-        Err(e) => {
-            return Err(CliError::Config(format!(
-                "could not read Chrome cookies via rookie: {e}"
-            )));
-        }
-    };
+    let raw_cookies = [
+        rookie::chrome(Some(domains.clone())),
+        rookie::arc(Some(domains.clone())),
+        rookie::brave(Some(domains.clone())),
+        rookie::firefox(Some(domains.clone())),
+        rookie::edge(Some(domains)),
+    ]
+    .into_iter()
+    .find_map(|result| match result {
+        Ok(cookies) if cookies.iter().any(|c| c.domain.contains("suno.com")) => Some(cookies),
+        _ => None,
+    })
+    .ok_or_else(|| {
+        CliError::Config(
+            "could not read Suno cookies from Chrome, Arc, Brave, Firefox, or Edge".into(),
+        )
+    })?;
 
     for c in raw_cookies {
         if !c.domain.contains("suno.com") {
@@ -460,6 +485,33 @@ fn extract_cookies() -> Result<Vec<CdpCookie>, CliError> {
         });
     }
     Ok(out)
+}
+
+fn cookies_from_header(cookie_header: &str) -> Vec<CdpCookie> {
+    cookie_header
+        .split(';')
+        .filter_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let domain = if name == "__client" {
+                "auth.suno.com"
+            } else {
+                ".suno.com"
+            };
+            Some(CdpCookie {
+                name: name.to_string(),
+                value: value.trim().to_string(),
+                domain: domain.to_string(),
+                path: "/".to_string(),
+                secure: true,
+                http_only: name == "__client",
+                same_site: "Lax",
+            })
+        })
+        .collect()
 }
 
 /// Drain the spawned Chrome's stderr in the background — keeps it from

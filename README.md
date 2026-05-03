@@ -39,7 +39,7 @@ This CLI fixes that. Auto-auth from your browser, every generation parameter exp
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew tap 199-biotechnologies/tap
+brew tap paperfoot/tap
 brew install suno
 ```
 
@@ -150,12 +150,15 @@ suno update          Self-update from GitHub Releases (--check to peek first)
 suno auth --login    # Extracts session from your browser automatically
 ```
 
-Reads the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge. Exchanges it for a JWT via Clerk token exchange. Auto-refreshes when expired (~7 day session lifetime). One macOS Keychain dialog on first run, then silent.
+Reads the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge. Exchanges it for a JWT via Clerk token exchange, stores the refreshable session in a `0600` local auth file, and refreshes stale JWTs automatically when the underlying browser session is still valid.
 
-Three auth methods (in order of convenience):
+Auth methods (in order of convenience):
 1. `suno auth --login` — automatic browser extraction (recommended)
-2. `suno auth --cookie <clerk_cookie>` — manual paste for headless servers
+2. `suno auth --cookie <cookie>` — manual paste for headless servers; accepts either raw `__client` or a full browser `Cookie` header
 3. `suno auth --jwt <token>` — direct JWT, expires in ~1 hour
+4. `suno auth --refresh` — force a fresh JWT from the stored Clerk session
+
+`suno auth` with no flags checks the existing session, or starts browser login if no auth is configured. `suno auth --logout` removes stored credentials.
 
 ### Generation Parameters
 
@@ -312,12 +315,12 @@ After installation, your coding agent automatically picks up the skill on the ne
 | Endpoint | Version | Status |
 |---|---|---|
 | Feed | **v3** (`POST /api/feed/v3`) | Latest |
-| Generate | **v2** (`POST /api/generate/v2/`) | Latest (only version) |
+| Generate | **v2-web** (`POST /api/generate/v2-web/`) | Latest web generation route |
 | Concat | **v2** (`POST /api/generate/concat/v2/`) | Latest |
 | Aligned lyrics | **v2** (`GET /api/gen/{id}/aligned_lyrics/v2/`) | Latest |
 | Persona | `GET /api/persona/get-persona-paginated/{id}/` | Confirmed |
 
-All generation tasks (normal, voice persona, cover, extend) go through `/api/generate/v2/` with different `task` values.
+Generation tasks use `/api/generate/v2-web/` with the current web request shape. Normal generation and voice-persona generation are verified; cover/remaster support is implemented but should be recaptured whenever Suno changes the web schema.
 
 ## Contributing
 
@@ -330,6 +333,7 @@ We especially welcome:
 - Audio upload implementation (S3 presigned flow documented in `API_INTELLIGENCE.md`)
 - Voice persona creation workflow (endpoints captured, request bodies needed)
 - Integration tests with `assert_cmd`
+- OS keychain/Secret Service/CredMan storage for auth secrets
 
 ## License
 

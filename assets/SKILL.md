@@ -32,8 +32,9 @@ suno credits
 If `suno auth --login` fails on a headless box, fall back to:
 
 ```bash
-suno auth --cookie '<clerk __client cookie>'   # paste from browser DevTools
-suno auth --jwt '<jwt>'                        # ~1 hour lifetime
+suno auth --cookie '<Cookie header or __client value>'  # paste from browser DevTools
+suno auth --jwt '<jwt>'                                  # ~1 hour lifetime
+suno auth --refresh                                      # force-refresh stored Clerk session
 ```
 
 ## Discovery
@@ -184,7 +185,7 @@ suno download $ids --output ./archive/
 ## Notes
 
 - Auth refreshes automatically (~7-day session lifetime).
-- Captcha is **not** required for Premier accounts with 200+ credits consumed.
+- Generation normally needs the built-in browser-backed hCaptcha solver; use `--no-captcha` only when you supply a valid `--token` or are deliberately testing API behavior.
 - All generation paths (normal, voice persona, cover, extend) go through `/api/generate/v2-web/` — but you don't need to know that, just use the subcommands.
 - When the CLI returns `schema_drift` (Suno changed their API), run `suno update` to pull the latest binary from GitHub Releases.
 - When unsure about flags, run `suno <command> --help` or `suno agent-info`.

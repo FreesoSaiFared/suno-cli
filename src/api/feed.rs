@@ -14,9 +14,12 @@ impl SunoClient {
             limit: Some(20),
             filters: None,
         };
-        let resp = self.post("/api/feed/v3").json(&req).send().await?;
-        let resp = self.check_response(resp).await?;
-        Ok(resp.json().await?)
+        self.with_auth_retry(|| async {
+            let resp = self.post("/api/feed/v3").json(&req).send().await?;
+            let resp = self.check_response(resp).await?;
+            Ok(resp.json().await?)
+        })
+        .await
     }
 
     /// Search songs using feed/v3 native searchText filter.
@@ -31,8 +34,11 @@ impl SunoClient {
                 stem: None,
             }),
         };
-        let resp = self.post("/api/feed/v3").json(&req).send().await?;
-        let resp = self.check_response(resp).await?;
-        Ok(resp.json().await?)
+        self.with_auth_retry(|| async {
+            let resp = self.post("/api/feed/v3").json(&req).send().await?;
+            let resp = self.check_response(resp).await?;
+            Ok(resp.json().await?)
+        })
+        .await
     }
 }

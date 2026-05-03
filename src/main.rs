@@ -118,11 +118,24 @@ async fn run() -> Result<(), CliError> {
 
     match cli.command {
         Commands::Auth(args) => {
+            if args.logout {
+                AuthState::delete()?;
+                eprintln!("Logged out; removed stored Suno authentication");
+                return Ok(());
+            }
+
             let mut state = match AuthState::load() {
                 Ok(s) => s,
                 Err(CliError::AuthMissing) => AuthState::default(),
                 Err(e) => return Err(e),
             };
+
+            let has_explicit_auth_input =
+                args.login || args.refresh || args.jwt.is_some() || args.cookie.is_some();
+            let should_login = args.login
+                || (!has_explicit_auth_input
+                    && state.jwt.is_none()
+                    && state.clerk_client_cookie.is_none());
 
             if args.refresh {
                 // Force-refresh the JWT via the stored Clerk session cookie.
@@ -133,57 +146,79 @@ async fn run() -> Result<(), CliError> {
                         "no Clerk session cookie stored — run `suno auth --login` first".into(),
                     )
                 })?;
-                let session_id = state.session_id.clone().ok_or_else(|| {
-                    CliError::Config("no Clerk session id stored — run `suno auth --login`".into())
-                })?;
                 let http = reqwest::Client::new();
                 eprintln!("Refreshing JWT via Clerk session cookie...");
-                let jwt = auth::clerk_refresh_jwt(&http, &cookie, &session_id).await?;
+                let (session_id, jwt) = if let Some(session_id) = state.session_id.clone() {
+                    (
+                        session_id.clone(),
+                        auth::clerk_refresh_jwt(&http, &cookie, &session_id).await?,
+                    )
+                } else {
+                    auth::clerk_token_exchange(&http, &cookie).await?
+                };
+                state.session_id = Some(session_id);
                 state.jwt = Some(jwt);
                 state.save()?;
                 eprintln!("JWT refreshed successfully");
-                return Ok(());
-            } else if args.login {
+            } else if should_login {
                 // Automatic: extract cookies from browser
                 eprintln!("Extracting Suno session from your browser...");
-                let clerk_cookie = auth::extract_clerk_cookie()?;
+                let browser_auth = auth::extract_browser_auth()?;
 
                 let http = reqwest::Client::new();
                 eprintln!("Exchanging for access token via Clerk...");
-                let (session_id, jwt) = auth::clerk_token_exchange(&http, &clerk_cookie).await?;
+                let (session_id, jwt) =
+                    auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
-                state.clerk_client_cookie = Some(clerk_cookie);
+                state.cookie = Some(browser_auth.cookie_header);
+                state.clerk_client_cookie = Some(browser_auth.clerk_client_cookie);
                 state.session_id = Some(session_id);
                 state.jwt = Some(jwt);
-                if state.device_id.is_none() {
-                    state.device_id = Some(uuid::Uuid::new_v4().to_string());
-                }
-            } else if let Some(cookie) = args.cookie {
-                // Manual: user provides Clerk __client cookie
+                state.device_id = browser_auth
+                    .device_id
+                    .or(state.device_id)
+                    .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+            } else if let Some(cookie) = args.cookie.as_deref() {
+                // Manual: user provides a full Cookie header or raw Clerk __client value.
+                let browser_auth = auth::normalize_cookie_input(cookie)?;
                 let http = reqwest::Client::new();
                 eprintln!("Exchanging cookie for access token...");
-                let (session_id, jwt) = auth::clerk_token_exchange(&http, &cookie).await?;
+                let (session_id, jwt) =
+                    auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
-                state.clerk_client_cookie = Some(cookie);
+                state.cookie = Some(browser_auth.cookie_header);
+                state.clerk_client_cookie = Some(browser_auth.clerk_client_cookie);
                 state.session_id = Some(session_id);
+                state.jwt = Some(jwt);
+                state.device_id = browser_auth
+                    .device_id
+                    .or(state.device_id)
+                    .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+            } else if let Some(jwt) = args.jwt.clone() {
+                // Legacy: direct JWT paste (expires in ~1 hour)
                 state.jwt = Some(jwt);
                 if state.device_id.is_none() {
                     state.device_id = Some(uuid::Uuid::new_v4().to_string());
                 }
-            } else if let Some(jwt) = args.jwt {
-                // Legacy: direct JWT paste (expires in ~1 hour)
-                state.jwt = Some(jwt);
+            } else {
+                eprintln!("Checking existing authentication...");
             }
 
-            if let Some(device) = args.device {
-                state.device_id = Some(device);
+            if let Some(device) = args.device.as_ref() {
+                state.device_id = Some(device.clone());
             }
-
-            state.save()?;
 
             // Verify
-            let client = SunoClient::new_with_refresh(state).await?;
+            let should_save_after_verify = args.refresh
+                || should_login
+                || args.cookie.is_some()
+                || args.jwt.is_some()
+                || args.device.is_some();
+            let client = SunoClient::new_with_refresh(state.clone()).await?;
             let info = client.billing_info().await?;
+            if should_save_after_verify {
+                state.save()?;
+            }
             eprintln!(
                 "Authenticated! Plan: {}, Credits: {}",
                 info.plan.name, info.total_credits_left
@@ -569,13 +604,19 @@ async fn run() -> Result<(), CliError> {
             ConfigAction::Check => {
                 let _ = config::AppConfig::load();
                 match AuthState::load() {
-                    Ok(auth) => {
-                        if auth.is_jwt_expired() {
-                            eprintln!("Auth: JWT expired — run `suno auth`");
-                        } else {
-                            eprintln!("Auth: OK");
+                    Ok(auth) => match SunoClient::new_with_refresh(auth).await {
+                        Ok(client) => {
+                            let info = client.billing_info().await?;
+                            eprintln!(
+                                "Auth: OK — {}, {} credits",
+                                info.plan.name, info.total_credits_left
+                            );
                         }
-                    }
+                        Err(CliError::AuthExpired) => {
+                            eprintln!("Auth: expired — run `suno auth --login`");
+                        }
+                        Err(e) => return Err(e),
+                    },
                     Err(_) => eprintln!("Auth: not configured — run `suno auth`"),
                 }
             }
@@ -646,7 +687,7 @@ async fn run() -> Result<(), CliError> {
         Commands::Update(args) => {
             let current = env!("CARGO_PKG_VERSION");
             let updater = self_update::backends::github::Update::configure()
-                .repo_owner("199-biotechnologies")
+                .repo_owner("paperfoot")
                 .repo_name("suno-cli")
                 .bin_name("suno")
                 .show_download_progress(!cli.quiet)
@@ -756,6 +797,19 @@ async fn run() -> Result<(), CliError> {
                 },
                 "env_prefix": "SUNO_",
                 "auth_path": auth_path,
+                "auth": {
+                    "recommended": "suno auth --login",
+                    "methods": [
+                        "browser_cookie_extract",
+                        "full_cookie_header",
+                        "raw_clerk_client_cookie",
+                        "direct_jwt",
+                        "stored_clerk_refresh",
+                    ],
+                    "logout": "suno auth --logout",
+                    "generation_captcha": "Default generation uses the browser-backed hCaptcha solver. Use --no-captcha only with a valid --token or for deliberate API tests.",
+                },
+                "provider": "direct_suno_unofficial",
                 "auth_required": true,
                 "default_model": "chirp-fenix (v5.5)",
             });

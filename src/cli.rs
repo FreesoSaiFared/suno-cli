@@ -426,12 +426,18 @@ pub struct AuthArgs {
     pub jwt: Option<String>,
 
     /// Clerk __client cookie (manual fallback for headless servers)
+    ///
+    /// Accepts either the raw __client value or a full browser Cookie header.
     #[arg(long)]
     pub cookie: Option<String>,
 
     /// Device ID
     #[arg(long)]
     pub device: Option<String>,
+
+    /// Remove stored authentication
+    #[arg(long)]
+    pub logout: bool,
 }
 
 #[derive(clap::Args)]

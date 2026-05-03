@@ -8,7 +8,7 @@ pub enum CliError {
     #[error("Authentication required — run `suno auth` first")]
     AuthMissing,
 
-    #[error("JWT expired — run `suno auth` to refresh")]
+    #[error("JWT expired or rejected by Suno")]
     AuthExpired,
 
     #[error("Rate limited by Suno — wait and retry")]
@@ -76,7 +76,9 @@ impl CliError {
     pub fn suggestion(&self) -> &'static str {
         match self {
             Self::AuthMissing => "Run `suno auth --login` to authenticate",
-            Self::AuthExpired => "Run `suno auth --login` to refresh your session",
+            Self::AuthExpired => {
+                "Run `suno auth --refresh`; if that fails, run `suno auth --login`"
+            }
             Self::RateLimited => "Wait 30-60 seconds and retry",
             Self::Config(_) => "Check `suno config check` for configuration issues",
             Self::NotFound(_) => "Verify the ID exists with `suno list` or `suno search`",
