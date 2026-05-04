@@ -72,7 +72,8 @@ async fn ensure_chrome_running() -> Result<(), CliError> {
 
     // NOTE: do NOT use --headless. hCaptcha's bot-detection trips on headless
     // mode and returns "challenge-expired". We run a real headed Chrome but
-    // shove it far offscreen + give it a 1x1 window so the user never sees it.
+    // shove it far offscreen. Keep a desktop-sized viewport: a 1x1 window makes
+    // Suno serve its mobile/app interstitial, which never loads hCaptcha.
     let mut child = Command::new(&chrome_path)
         .arg(format!("--remote-debugging-port={CDP_PORT}"))
         .arg(format!("--user-data-dir={}", profile_dir.display()))
@@ -81,7 +82,7 @@ async fn ensure_chrome_running() -> Result<(), CliError> {
         .arg("--disable-search-engine-choice-screen")
         .arg("--disable-features=TranslateUI")
         .arg("--window-position=-32000,-32000")
-        .arg("--window-size=1,1")
+        .arg("--window-size=1280,900")
         .arg("--silent-launch")
         .arg("about:blank")
         .stdout(Stdio::null())
@@ -310,6 +311,18 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
     cdp_call(&mut ws, next(), "Network.enable", serde_json::json!({})).await?;
     cdp_call(&mut ws, next(), "Page.enable", serde_json::json!({})).await?;
     cdp_call(&mut ws, next(), "Runtime.enable", serde_json::json!({})).await?;
+    cdp_call(
+        &mut ws,
+        next(),
+        "Emulation.setDeviceMetricsOverride",
+        serde_json::json!({
+            "width": 1280,
+            "height": 900,
+            "deviceScaleFactor": 1,
+            "mobile": false
+        }),
+    )
+    .await?;
 
     // The managed profile is persistent across CLI invocations. Clear any
     // previously injected full browser cookie set first; stale analytics and
