@@ -13,6 +13,7 @@
 //!
 //! Discovered + verified end-to-end on 2026-04-08.
 
+use std::collections::HashSet;
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -192,21 +193,23 @@ async fn cdp_list() -> Result<Vec<Target>, CliError> {
     Ok(list)
 }
 
-/// Find the existing suno.com tab in the managed Chrome, or open a new one
-/// at suno.com/create.
+/// Find the existing page in the managed Chrome, or open a new blank one.
+/// Navigation to suno.com/create happens only after we have cleared stale
+/// cookies and installed the small cookie subset the captcha page needs.
 async fn find_or_create_suno_tab() -> Result<Target, CliError> {
     let targets = cdp_list().await?;
-    if let Some(t) = targets
-        .into_iter()
-        .find(|t| t.target_type == "page" && t.url.contains("suno.com"))
-    {
+    if let Some(t) = targets.into_iter().find(|t| {
+        t.target_type == "page"
+            && !t.web_socket_debugger_url.is_empty()
+            && !t.url.starts_with("chrome://")
+    }) {
         return Ok(t);
     }
 
-    // No suno tab — open one. CDP exposes a /json/new?url= helper.
+    // No page target — open a blank one. CDP exposes a /json/new?url= helper.
     let url = format!(
         "http://{CDP_HOST}:{CDP_PORT}/json/new?{}",
-        urlencode("https://suno.com/create")
+        urlencode("about:blank")
     );
     let resp = reqwest::Client::new()
         .put(&url)
@@ -308,8 +311,21 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
     cdp_call(&mut ws, next(), "Page.enable", serde_json::json!({})).await?;
     cdp_call(&mut ws, next(), "Runtime.enable", serde_json::json!({})).await?;
 
-    // Inject cookies fresh from rookie every time so we always have the
-    // latest from the user's main Chrome.
+    // The managed profile is persistent across CLI invocations. Clear any
+    // previously injected full browser cookie set first; stale analytics and
+    // Clerk duplicates can make suno.com/create fail with HTTP 431 before
+    // hCaptcha even loads.
+    cdp_call(
+        &mut ws,
+        next(),
+        "Network.clearBrowserCookies",
+        serde_json::json!({}),
+    )
+    .await?;
+
+    // Inject only the narrow Suno/Clerk cookie subset required to let the web
+    // app initialize. Replaying the whole browser Cookie header is brittle and
+    // can exceed Suno/Clerk request-header limits.
     let cookies = extract_cookies(auth)?;
     if !cookies.is_empty() {
         cdp_call(
@@ -321,63 +337,46 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
         .await?;
     }
 
-    // Probe current URL — navigate if not already on suno.com/create
-    let page_url = cdp_call(
+    cdp_call(
         &mut ws,
         next(),
-        "Runtime.evaluate",
-        serde_json::json!({
-            "expression": "location.href",
-            "returnByValue": true,
-        }),
+        "Page.navigate",
+        serde_json::json!({ "url": "https://suno.com/create" }),
     )
     .await?;
-    let needs_nav = page_url
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .and_then(|v| v.as_str())
-        .map(|s| !s.contains("suno.com/create"))
-        .unwrap_or(true);
-    if needs_nav {
-        cdp_call(
+
+    // Poll for hcaptcha global (up to 30s).
+    let mut ready = false;
+    for _ in 0..30 {
+        sleep(Duration::from_secs(1)).await;
+        let probe = cdp_call(
             &mut ws,
             next(),
-            "Page.navigate",
-            serde_json::json!({ "url": "https://suno.com/create" }),
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": "typeof hcaptcha !== 'undefined' && !!hcaptcha.render",
+                "returnByValue": true,
+            }),
         )
         .await?;
-        // Poll for hcaptcha global (up to 30s)
-        let mut ready = false;
-        for _ in 0..30 {
-            sleep(Duration::from_secs(1)).await;
-            let probe = cdp_call(
-                &mut ws,
-                next(),
-                "Runtime.evaluate",
-                serde_json::json!({
-                    "expression": "typeof hcaptcha !== 'undefined' && !!hcaptcha.render",
-                    "returnByValue": true,
-                }),
-            )
-            .await?;
-            if probe
-                .get("result")
-                .and_then(|r| r.get("value"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                ready = true;
-                break;
-            }
+        if probe
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            ready = true;
+            break;
         }
-        if !ready {
-            return Err(CliError::Config(
-                "hcaptcha never finished loading on suno.com/create".into(),
-            ));
-        }
-        // Extra settle so the SDK is fully wired up
-        sleep(Duration::from_secs(2)).await;
     }
+    if !ready {
+        let page_state = page_state_excerpt(&mut ws, &mut next).await?;
+        return Err(CliError::Config(format!(
+            "hcaptcha never finished loading on suno.com/create ({page_state})"
+        )));
+    }
+    // Extra settle so the SDK is fully wired up.
+    sleep(Duration::from_secs(2)).await;
 
     // Render an invisible widget and execute it
     let solve_js = format!(
@@ -435,83 +434,209 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
 
 /// Pull the user's Suno cookies from their main Chrome via `rookie`.
 /// Returns them in CDP `Network.CookieParam` shape.
+async fn page_state_excerpt(
+    ws: &mut CdpStream,
+    next: &mut impl FnMut() -> u64,
+) -> Result<String, CliError> {
+    let state = cdp_call(
+        ws,
+        next(),
+        "Runtime.evaluate",
+        serde_json::json!({
+            "expression": "JSON.stringify({ href: location.href, body: (document.body && document.body.innerText || '').slice(0, 240) })",
+            "returnByValue": true,
+        }),
+    )
+    .await?;
+    let raw = state
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("{}");
+    let parsed: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+    let href = parsed.get("href").and_then(|v| v.as_str()).unwrap_or("");
+    let body = parsed
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .replace(['\n', '\r'], " ");
+    if body.is_empty() {
+        Ok(format!("page={href}"))
+    } else {
+        Ok(format!("page={href}; body={body}"))
+    }
+}
+
 fn extract_cookies(auth: &AuthState) -> Result<Vec<CdpCookie>, CliError> {
-    if let Some(cookie_header) = auth.cookie.as_deref().filter(|c| !c.trim().is_empty()) {
-        return Ok(cookies_from_header(cookie_header));
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    if add_live_browser_cookies(&mut out, &mut seen) && !out.is_empty() {
+        return Ok(out);
     }
 
+    if let Some(clerk) = auth
+        .clerk_client_cookie
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+    {
+        push_cookie(
+            &mut out,
+            &mut seen,
+            "__client",
+            clerk.trim(),
+            "auth.suno.com",
+            true,
+        );
+        push_cookie(
+            &mut out,
+            &mut seen,
+            "__client",
+            clerk.trim(),
+            ".suno.com",
+            true,
+        );
+    }
+
+    if let Some(device_id) = auth.device_id.as_deref().filter(|d| !d.trim().is_empty()) {
+        push_cookie(
+            &mut out,
+            &mut seen,
+            "ajs_anonymous_id",
+            device_id.trim(),
+            ".suno.com",
+            false,
+        );
+    }
+
+    if let Some(cookie_header) = auth.cookie.as_deref().filter(|c| !c.trim().is_empty()) {
+        add_minimal_cookies_from_header(cookie_header, &mut out, &mut seen);
+    }
+
+    if !out.is_empty() {
+        return Ok(out);
+    }
+
+    if add_live_browser_cookies(&mut out, &mut seen) && !out.is_empty() {
+        return Ok(out);
+    }
+
+    Ok(out)
+}
+
+fn add_live_browser_cookies(
+    out: &mut Vec<CdpCookie>,
+    seen: &mut HashSet<(String, String)>,
+) -> bool {
     let domains: Vec<String> = vec![
         "suno.com".into(),
         "auth.suno.com".into(),
         ".suno.com".into(),
     ];
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    let raw_cookies = [
-        rookie::chrome(Some(domains.clone())),
-        rookie::arc(Some(domains.clone())),
-        rookie::brave(Some(domains.clone())),
-        rookie::firefox(Some(domains.clone())),
-        rookie::edge(Some(domains)),
+    let Some((browser_name, raw_cookies)) = [
+        ("Chrome", rookie::chrome(Some(domains.clone()))),
+        ("Arc", rookie::arc(Some(domains.clone()))),
+        ("Brave", rookie::brave(Some(domains.clone()))),
+        ("Firefox", rookie::firefox(Some(domains.clone()))),
+        ("Edge", rookie::edge(Some(domains))),
     ]
     .into_iter()
-    .find_map(|result| match result {
-        Ok(cookies) if cookies.iter().any(|c| c.domain.contains("suno.com")) => Some(cookies),
+    .find_map(|(browser_name, result)| match result {
+        Ok(cookies) if cookies.iter().any(|c| c.domain.contains("suno.com")) => {
+            Some((browser_name, cookies))
+        }
         _ => None,
-    })
-    .ok_or_else(|| {
-        CliError::Config(
-            "could not read Suno cookies from Chrome, Arc, Brave, Firefox, or Edge".into(),
-        )
-    })?;
+    }) else {
+        return false;
+    };
 
     for c in raw_cookies {
         if !c.domain.contains("suno.com") {
             continue;
         }
-        let key = (c.name.clone(), c.domain.clone());
-        if !seen.insert(key) {
-            continue;
-        }
-        out.push(CdpCookie {
-            name: c.name,
-            value: c.value,
-            domain: c.domain,
-            path: c.path,
-            secure: c.secure,
-            http_only: c.http_only,
-            same_site: "Lax",
-        });
+        add_minimal_cookie(&c.name, &c.value, &c.domain, c.http_only, out, seen);
     }
-    Ok(out)
+
+    if !out.is_empty() {
+        eprintln!("Using fresh Suno browser cookies from {browser_name}");
+    }
+    !out.is_empty()
 }
 
-fn cookies_from_header(cookie_header: &str) -> Vec<CdpCookie> {
-    cookie_header
-        .split(';')
-        .filter_map(|part| {
-            let (name, value) = part.trim().split_once('=')?;
-            let name = name.trim();
-            if name.is_empty() {
-                return None;
-            }
-            let domain = if name == "__client" {
-                "auth.suno.com"
-            } else {
-                ".suno.com"
-            };
-            Some(CdpCookie {
-                name: name.to_string(),
-                value: value.trim().to_string(),
-                domain: domain.to_string(),
-                path: "/".to_string(),
-                secure: true,
-                http_only: name == "__client",
-                same_site: "Lax",
-            })
-        })
-        .collect()
+fn add_minimal_cookies_from_header(
+    cookie_header: &str,
+    out: &mut Vec<CdpCookie>,
+    seen: &mut HashSet<(String, String)>,
+) {
+    for part in cookie_header.split(';') {
+        let Some((name, value)) = part.trim().split_once('=') else {
+            continue;
+        };
+        add_minimal_cookie(name.trim(), value.trim(), ".suno.com", false, out, seen);
+    }
+}
+
+fn add_minimal_cookie(
+    name: &str,
+    value: &str,
+    domain: &str,
+    http_only: bool,
+    out: &mut Vec<CdpCookie>,
+    seen: &mut HashSet<(String, String)>,
+) {
+    if name.is_empty() || value.is_empty() || !is_captcha_cookie(name) {
+        return;
+    }
+
+    if name == "__client" || name.starts_with("__client_") {
+        push_cookie(out, seen, name, value, "auth.suno.com", true);
+        push_cookie(out, seen, name, value, ".suno.com", true);
+        return;
+    }
+
+    let cookie_domain = if domain.contains("auth.suno.com") {
+        "auth.suno.com"
+    } else {
+        ".suno.com"
+    };
+    push_cookie(out, seen, name, value, cookie_domain, http_only);
+}
+
+fn is_captcha_cookie(name: &str) -> bool {
+    matches!(
+        name,
+        "__session"
+            | "clerk_active_context"
+            | "ajs_anonymous_id"
+            | "suno_device_id"
+            | "statsig_stable_id"
+            | "ssr_bucket"
+            | "has_logged_in_before"
+    ) || name.starts_with("__client_")
+        || name.starts_with("__session_")
+}
+
+fn push_cookie(
+    out: &mut Vec<CdpCookie>,
+    seen: &mut HashSet<(String, String)>,
+    name: &str,
+    value: &str,
+    domain: &str,
+    http_only: bool,
+) {
+    let key = (name.to_string(), domain.to_string());
+    if !seen.insert(key) {
+        return;
+    }
+    out.push(CdpCookie {
+        name: name.to_string(),
+        value: value.to_string(),
+        domain: domain.to_string(),
+        path: "/".to_string(),
+        secure: true,
+        http_only,
+        same_site: "Lax",
+    });
 }
 
 /// Drain the spawned Chrome's stderr in the background — keeps it from
