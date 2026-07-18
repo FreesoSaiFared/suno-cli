@@ -21,6 +21,9 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
 
     let ext = if video { "mp4" } else { "mp3" };
     let filename = clip_filename(&clip.title, &clip.id, ext);
+    // Create the target dir up front: generation has already spent credits by
+    // the time we download, so a missing `--download` dir must not error out.
+    tokio::fs::create_dir_all(output_dir).await?;
     let path = Path::new(output_dir).join(&filename);
 
     let client = reqwest::Client::new();
