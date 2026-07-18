@@ -78,8 +78,8 @@ fn build_control_sliders(
 }
 
 /// Resolve the captcha token for the five captcha-gated v2-web commands
-/// (generate, describe, extend, cover, remaster). Returns
-/// `(token, token_provider)` for the request body.
+/// (generate, describe, extend, cover, remaster). Returns the token to attach
+/// to the request body, or `None` when no captcha is needed.
 ///
 /// An explicit --token wins (assumed hCaptcha-solved); --no-captcha means
 /// never solve. Otherwise preflight `/api/c/check` — most accounts are above
@@ -90,12 +90,12 @@ async fn resolve_captcha(
     token: Option<String>,
     no_captcha: bool,
     quiet: bool,
-) -> Result<(Option<String>, Option<String>), CliError> {
+) -> Result<Option<String>, CliError> {
     if let Some(t) = token {
-        return Ok((Some(t), Some("hcaptcha".to_string())));
+        return Ok(Some(t));
     }
     if no_captcha {
-        return Ok((None, None));
+        return Ok(None);
     }
 
     // Test hook: SUNO_FORCE_CAPTCHA=1 skips the preflight and always runs the
@@ -116,7 +116,7 @@ async fn resolve_captcha(
         if !quiet {
             eprintln!("Captcha not required — skipping solver");
         }
-        return Ok((None, None));
+        return Ok(None);
     }
 
     if !quiet {
@@ -145,7 +145,7 @@ async fn resolve_captcha(
             &solved[..solved.len().min(24)]
         );
     }
-    Ok((Some(solved), Some("hcaptcha".to_string())))
+    Ok(Some(solved))
 }
 
 /// Generate, wait, optionally download with lyrics embedding.
@@ -465,10 +465,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             req.persona_id = args.persona.clone();
             req.metadata.control_sliders = control_sliders;
 
-            let (token, token_provider) =
-                resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
-            req.token = token;
-            req.token_provider = token_provider;
+            req.token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
 
             if !cli.quiet {
                 let persona_note = if args.persona.is_some() {
@@ -514,10 +511,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             req.metadata.control_sliders = control_sliders;
 
             let c = client().await?;
-            let (token, token_provider) =
-                resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
-            req.token = token;
-            req.token_provider = token_provider;
+            req.token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
 
             if !cli.quiet {
                 eprintln!("Submitting description ({})...", model.display_name());
@@ -545,10 +539,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             req.continue_at = Some(args.at);
 
             let c = client().await?;
-            let (token, token_provider) =
-                resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
-            req.token = token;
-            req.token_provider = token_provider;
+            req.token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
 
             let clips = c.generate(&req).await?;
             handle_generation(&c, clips, args.wait, None, fmt, cli.quiet, &cfg).await?;
@@ -569,8 +560,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             guard.acquire(args.force)?;
 
             let c = client().await?;
-            let (token, token_provider) =
-                resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            let token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
             let control_sliders = build_control_sliders(None, None, args.audio_influence);
 
             if !cli.quiet {
@@ -582,7 +572,6 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                     model.to_api_key(),
                     args.tags.as_deref(),
                     token,
-                    token_provider,
                     control_sliders,
                 )
                 .await?;
@@ -604,19 +593,13 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             guard.acquire(args.force)?;
 
             let c = client().await?;
-            let (token, token_provider) =
-                resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            let token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
 
             if !cli.quiet {
                 eprintln!("Remastering with {}...", args.model.to_api_key());
             }
             let clips = c
-                .remaster(
-                    &args.clip_id,
-                    args.model.to_api_key(),
-                    token,
-                    token_provider,
-                )
+                .remaster(&args.clip_id, args.model.to_api_key(), token)
                 .await?;
             handle_generation(
                 &c,

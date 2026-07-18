@@ -176,10 +176,9 @@ pub struct FilterPresence {
 pub struct GenerateRequest {
     /// Captcha/anti-bot token. Only needed when `/api/c/check` says the
     /// account is captcha-gated; `null` otherwise (matches the web app).
+    /// No companion `token_provider` field: Suno's v2-web schema types it as
+    /// an integer and 422s on a string, and the hCaptcha flow works without it.
     pub token: Option<String>,
-    /// Captcha scheme for `token` — `"hcaptcha"` when a solved token is
-    /// attached, `null` otherwise. July-2026 clients send both fields.
-    pub token_provider: Option<String>,
     pub generation_type: String,
     pub title: Option<String>,
     pub tags: Option<String>,
@@ -213,7 +212,6 @@ impl GenerateRequest {
     pub fn new(mv: &str, create_mode: &str) -> Self {
         Self {
             token: None,
-            token_provider: None,
             generation_type: "TEXT".to_string(),
             title: None,
             tags: None,
@@ -397,19 +395,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generate_request_sends_token_provider() {
+    fn generate_request_token_serialization() {
         let mut req = GenerateRequest::new("chirp-fenix", "custom");
         let v = serde_json::to_value(&req).unwrap();
-        // Both fields must be present as null when no captcha token is
-        // attached — matches July-2026 web clients.
+        // token is null when no captcha is required (the common case); there
+        // is no token_provider field — Suno's v2-web schema rejects it.
         assert_eq!(v["token"], serde_json::Value::Null);
-        assert_eq!(v["token_provider"], serde_json::Value::Null);
+        assert!(v.get("token_provider").is_none());
 
         req.token = Some("solved".into());
-        req.token_provider = Some("hcaptcha".into());
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["token"], "solved");
-        assert_eq!(v["token_provider"], "hcaptcha");
     }
 
     #[test]
