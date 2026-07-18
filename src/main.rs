@@ -98,10 +98,19 @@ async fn resolve_captcha(
         return Ok((None, None));
     }
 
-    let check = c.captcha_check("generation").await;
+    // Test hook: SUNO_FORCE_CAPTCHA=1 skips the preflight and always runs the
+    // solver so the browser path is exercisable on accounts that return
+    // required=false. Attaching an unrequested token is harmless.
+    let forced = std::env::var("SUNO_FORCE_CAPTCHA").is_ok_and(|v| v == "1");
+    let check = if forced {
+        None
+    } else {
+        Some(c.captcha_check("generation").await)
+    };
     let required = match &check {
-        Ok(resp) => resp.required,
-        Err(_) => true,
+        Some(Ok(resp)) => resp.required,
+        Some(Err(_)) => true,
+        None => true,
     };
     if !required {
         if !quiet {
@@ -111,9 +120,15 @@ async fn resolve_captcha(
     }
 
     if !quiet {
-        match check.ok().and_then(|r| r.captcha_version) {
-            Some(v) => eprintln!("Captcha required (version {v}) — solving via piloted Chrome..."),
-            None => eprintln!("Solving hCaptcha via piloted Chrome..."),
+        if forced {
+            eprintln!("SUNO_FORCE_CAPTCHA=1 — solving hCaptcha via piloted Chrome...");
+        } else {
+            match check.and_then(|r| r.ok()).and_then(|r| r.captcha_version) {
+                Some(v) => {
+                    eprintln!("Captcha required (version {v}) — solving via piloted Chrome...")
+                }
+                None => eprintln!("Solving hCaptcha via piloted Chrome..."),
+            }
         }
     }
     let auth = AuthState::load()?;
@@ -123,6 +138,13 @@ async fn resolve_captcha(
              generate one song in the suno.com UI to clear the challenge, then retry"
         ))
     })?;
+    if forced && !quiet {
+        eprintln!(
+            "Solved token: {} chars, prefix {}",
+            solved.len(),
+            &solved[..solved.len().min(24)]
+        );
+    }
     Ok((Some(solved), Some("hcaptcha".to_string())))
 }
 

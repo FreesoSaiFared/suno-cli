@@ -1,15 +1,22 @@
-//! hCaptcha bypass via piloted Chrome.
+//! hCaptcha bypass via a piloted Chrome.
 //!
 //! Suno gates `/api/generate/v2-web/` with an invisible hCaptcha challenge.
 //! The request body's `token` field must contain a freshly-solved hCaptcha
 //! response. Headless HTTP clients can't pass it; only a real browser with
 //! a warm behavioural fingerprint does.
 //!
-//! This module spawns a hidden Chrome instance with `--remote-debugging-port`
-//! enabled, injects the user's Suno cookies via CDP, navigates to
-//! suno.com/create, then renders an invisible hCaptcha widget and calls
-//! `hcaptcha.execute()` to obtain a token. The Chrome instance is reused
-//! across calls so subsequent generations are fast.
+//! This module spawns a headed Chrome instance shoved far offscreen (no window
+//! on screen, no focus steal) with `--remote-debugging-port` enabled, injects
+//! the user's Suno cookies via CDP, navigates to suno.com/create, then renders
+//! an invisible hCaptcha widget and calls `hcaptcha.execute()` to obtain a
+//! token. The Chrome instance is reused across calls so subsequent generations
+//! are fast.
+//!
+//! Both legacy `--headless` and the re-architected `--headless=new` (Chrome
+//! 109+) are still flagged by Suno's hCaptcha and return "challenge-expired"
+//! (headless=new verified failing 2026-07-18), so headless is NOT the default.
+//! `SUNO_CAPTCHA_HEADLESS=1` opts into `--headless=new` for re-testing when
+//! Chrome/hCaptcha behaviour changes.
 //!
 //! Discovered + verified end-to-end on 2026-04-08.
 
@@ -76,22 +83,32 @@ async fn ensure_chrome_running() -> Result<(), CliError> {
         .ok_or_else(|| CliError::Config("could not resolve data dir for chrome profile".into()))?;
     std::fs::create_dir_all(&profile_dir)?;
 
-    eprintln!("Launching headless Chrome for captcha solver (one-time per session)...");
+    // Default: a headed Chrome shoved far offscreen. --headless=new
+    // (SUNO_CAPTCHA_HEADLESS=1) is still flagged by Suno's hCaptcha and returns
+    // "challenge-expired", so it stays a gated re-test hook, not the default.
+    // Either way keep a desktop-sized viewport: a 1x1 window makes Suno serve
+    // its mobile interstitial, which never loads hCaptcha.
+    let headless = std::env::var("SUNO_CAPTCHA_HEADLESS").is_ok_and(|v| v == "1");
+    eprintln!(
+        "Launching {} Chrome for captcha solver (one-time per session)...",
+        if headless { "headless" } else { "offscreen" }
+    );
 
-    // NOTE: do NOT use --headless. hCaptcha's bot-detection trips on headless
-    // mode and returns "challenge-expired". We run a real headed Chrome but
-    // shove it far offscreen. Keep a desktop-sized viewport: a 1x1 window makes
-    // Suno serve its mobile/app interstitial, which never loads hCaptcha.
-    let mut child = Command::new(&chrome_path)
-        .arg(format!("--remote-debugging-port={CDP_PORT}"))
+    let mut cmd = Command::new(&chrome_path);
+    cmd.arg(format!("--remote-debugging-port={CDP_PORT}"))
         .arg(format!("--user-data-dir={}", profile_dir.display()))
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg("--disable-search-engine-choice-screen")
         .arg("--disable-features=TranslateUI")
-        .arg("--window-position=-32000,-32000")
-        .arg("--window-size=1280,900")
-        .arg("--silent-launch")
+        .arg("--window-size=1280,900");
+    if headless {
+        cmd.arg("--headless=new");
+    } else {
+        cmd.arg("--window-position=-32000,-32000")
+            .arg("--silent-launch");
+    }
+    let mut child = cmd
         .arg("about:blank")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
