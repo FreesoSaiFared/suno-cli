@@ -2,7 +2,7 @@
 //! (`config path` shows where) < `SUNO_*` env vars. Command-line flags beat
 //! all three at the call sites that consume these values.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use figment::{
     Figment,
@@ -76,7 +76,17 @@ impl AppConfig {
                 let n: u64 = value.parse().map_err(|_| {
                     CliError::InvalidInput(format!("{key} must be a positive integer, got {value}"))
                 })?;
-                toml::Value::Integer(n as i64)
+                if n == 0 {
+                    return Err(CliError::InvalidInput(format!(
+                        "{key} must be greater than zero, got {value}"
+                    )));
+                }
+                // TOML integers are i64; a checked conversion keeps a u64 past
+                // i64::MAX from silently persisting as a negative value.
+                let n = i64::try_from(n).map_err(|_| {
+                    CliError::InvalidInput(format!("{key} is too large, got {value}"))
+                })?;
+                toml::Value::Integer(n)
             }
             "default_model" => {
                 <crate::cli::ModelVersion as clap::ValueEnum>::from_str(value, true).map_err(
@@ -111,9 +121,53 @@ impl AppConfig {
         }
         let serialized = toml::to_string_pretty(&table)
             .map_err(|e| CliError::Config(format!("config serialize: {e}")))?;
-        std::fs::write(&path, serialized)?;
+        atomic_write(&path, &serialized)?;
         Ok(path)
     }
+
+    /// Semantic validation of the merged effective config, run by
+    /// `config check`. Parsing (via `load`) already caught type errors; this
+    /// catches values that parse but can't work: a zero poll interval/timeout
+    /// or a `default_model` that no longer maps to a `--model` value (e.g. a
+    /// stale `SUNO_DEFAULT_MODEL`).
+    pub fn validate(&self) -> Result<(), CliError> {
+        if self.poll_interval_secs == 0 {
+            return Err(CliError::Config(
+                "poll_interval_secs must be greater than zero".into(),
+            ));
+        }
+        if self.poll_timeout_secs == 0 {
+            return Err(CliError::Config(
+                "poll_timeout_secs must be greater than zero".into(),
+            ));
+        }
+        <crate::cli::ModelVersion as clap::ValueEnum>::from_str(&self.default_model, true)
+            .map_err(|_| {
+                CliError::Config(format!(
+                    "unknown default_model '{}' — see `suno generate --help` for valid values",
+                    self.default_model
+                ))
+            })?;
+        Ok(())
+    }
+}
+
+/// Write via a same-directory temp file plus atomic rename so a crash or a
+/// concurrent reader never observes a half-written config. The temp name is
+/// process-scoped to avoid two writers colliding on the same intermediate.
+fn atomic_write(path: &Path, contents: &str) -> Result<(), CliError> {
+    let file_name = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("config.toml");
+    let tmp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, contents)?;
+    // rename replaces the destination atomically on both POSIX and Windows.
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -153,5 +207,54 @@ mod tests {
             AppConfig::set_value("default_model", "v99"),
             Err(CliError::InvalidInput(_))
         ));
+        // Zero and past-i64::MAX must not persist (the latter used to wrap to a
+        // negative TOML integer under an unchecked `as i64`).
+        assert!(matches!(
+            AppConfig::set_value("poll_timeout_secs", "0"),
+            Err(CliError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            AppConfig::set_value("poll_interval_secs", "18446744073709551615"),
+            Err(CliError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_unusable_effective_config() {
+        assert!(AppConfig::default().validate().is_ok());
+
+        let bad_model = AppConfig {
+            default_model: "v99".into(),
+            ..AppConfig::default()
+        };
+        assert!(matches!(bad_model.validate(), Err(CliError::Config(_))));
+
+        let zero_interval = AppConfig {
+            poll_interval_secs: 0,
+            ..AppConfig::default()
+        };
+        assert!(matches!(zero_interval.validate(), Err(CliError::Config(_))));
+
+        let zero_timeout = AppConfig {
+            poll_timeout_secs: 0,
+            ..AppConfig::default()
+        };
+        assert!(matches!(zero_timeout.validate(), Err(CliError::Config(_))));
+    }
+
+    #[test]
+    fn atomic_write_replaces_without_leaving_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        atomic_write(&path, "a = 1\n").unwrap();
+        atomic_write(&path, "a = 2\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = 2\n");
+        // No stray temp files left behind in the target directory.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
     }
 }

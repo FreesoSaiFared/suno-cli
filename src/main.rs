@@ -884,11 +884,12 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                     OutputFormat::Table => println!("{}", path.display()),
                 }
             }
-            // Parse-only validation; the auth/Chrome/network health checks
-            // this used to half-do live in `doctor` now.
+            // Parse + semantic validation of the merged effective config; the
+            // auth/Chrome/network health checks this used to half-do live in
+            // `doctor` now.
             ConfigAction::Check => {
                 let path = config::config_path();
-                config::AppConfig::load()?;
+                config::AppConfig::load()?.validate()?;
                 match fmt {
                     OutputFormat::Json => output::json::success(serde_json::json!({
                         "valid": true,
