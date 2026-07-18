@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -25,8 +26,20 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
     // the time we download, so a missing `--download` dir must not error out.
     tokio::fs::create_dir_all(output_dir).await?;
     let path = Path::new(output_dir).join(&filename);
+    // Stream into a sibling `.part` and only rename into place on full success,
+    // so an interrupted or truncated transfer never leaves a file that looks
+    // like a finished download.
+    let part_path = path.with_extension(format!("{ext}.part"));
 
-    let client = reqwest::Client::new();
+    // Bounded client: connect timeout, per-read inactivity timeout (catches a
+    // stalled CDN mid-stream), and an overall cap. Without these a hung
+    // connection would block the download forever.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(600))
+        .build()
+        .map_err(CliError::Http)?;
     let resp = client
         .get(url)
         .send()
@@ -45,16 +58,51 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
     );
     pb.set_message(filename.clone());
 
-    let mut file = tokio::fs::File::create(&path).await?;
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(CliError::Http)?;
-        pb.inc(chunk.len() as u64);
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
+    let written = match stream_to_file(&part_path, resp, &pb).await {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return Err(e);
+        }
+    };
+
+    // Reject a short read against the advertised size instead of tagging a
+    // truncated MP3 downstream.
+    if total > 0 && written != total {
+        let _ = tokio::fs::remove_file(&part_path).await;
+        return Err(CliError::Download(format!(
+            "incomplete download: received {written} of {total} bytes for {filename}"
+        )));
+    }
+
+    if let Err(e) = tokio::fs::rename(&part_path, &path).await {
+        let _ = tokio::fs::remove_file(&part_path).await;
+        return Err(e.into());
     }
     pb.finish_with_message("done");
 
     Ok(path.display().to_string())
+}
+
+/// Stream a response body to `part_path`, returning the byte count written.
+/// The caller removes the partial file on any error.
+async fn stream_to_file(
+    part_path: &Path,
+    resp: reqwest::Response,
+    pb: &ProgressBar,
+) -> Result<u64, CliError> {
+    use tokio::io::AsyncWriteExt as _;
+    let mut file = tokio::fs::File::create(part_path).await?;
+    let mut stream = resp.bytes_stream();
+    let mut written: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(CliError::Http)?;
+        pb.inc(chunk.len() as u64);
+        written += chunk.len() as u64;
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+    Ok(written)
 }
 
 /// Build `<title-slug>-<id8>.<ext>`. Runs of non-alphanumeric chars collapse

@@ -93,28 +93,77 @@ pub fn install(fmt: OutputFormat, quiet: bool, force: bool) -> Result<(), CliErr
 }
 
 /// Back-compat `install-skill --path`: write a single copy to a custom
-/// location (with ~ expansion) instead of the per-platform install.
-pub fn install_to_path(path: &str, fmt: OutputFormat, quiet: bool) -> Result<(), CliError> {
+/// location (with ~ expansion) instead of the per-platform install. Refuses to
+/// clobber an existing file unless `force`, so a mistyped path can't silently
+/// overwrite an unrelated file; re-writing the identical skill is a no-op.
+pub fn install_to_path(
+    path: &str,
+    fmt: OutputFormat,
+    quiet: bool,
+    force: bool,
+) -> Result<(), CliError> {
     let dest: PathBuf = if let Some(stripped) = path.strip_prefix("~/") {
         home().join(stripped)
     } else {
         PathBuf::from(path)
     };
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
+
+    let mut already_current = false;
+    if dest.exists() {
+        if !dest.is_file() {
+            return Err(CliError::InvalidInput(format!(
+                "{} exists and is not a regular file",
+                dest.display()
+            )));
+        }
+        already_current = std::fs::read_to_string(&dest).is_ok_and(|c| c == SKILL_CONTENT);
+        if !already_current && !force {
+            return Err(CliError::InvalidInput(format!(
+                "{} already exists — pass --force to overwrite it",
+                dest.display()
+            )));
+        }
     }
-    std::fs::write(&dest, SKILL_CONTENT)?;
+
+    if !already_current {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        atomic_write(&dest, SKILL_CONTENT)?;
+    }
 
     match fmt {
         OutputFormat::Json => crate::output::json::success(serde_json::json!({
             "installed": true,
             "path": dest.display().to_string(),
+            "status": if already_current { "already_current" } else { "installed" },
         })),
         OutputFormat::Table => {
             if !quiet {
-                eprintln!("Installed suno skill to: {}", dest.display());
+                let verb = if already_current {
+                    "Already current"
+                } else {
+                    "Installed suno skill to"
+                };
+                eprintln!("{verb}: {}", dest.display());
             }
         }
+    }
+    Ok(())
+}
+
+/// Write via a same-directory temp file + atomic rename so a crash or a
+/// concurrent reader never sees a half-written skill file.
+fn atomic_write(dest: &std::path::Path, contents: &str) -> Result<(), CliError> {
+    let file_name = dest
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("SKILL.md");
+    let tmp = dest.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, contents)?;
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
     }
     Ok(())
 }

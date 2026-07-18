@@ -922,7 +922,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             if args.print {
                 print!("{}", commands::skill::SKILL_CONTENT);
             } else if let Some(path) = args.path.as_deref() {
-                commands::skill::install_to_path(path, fmt, cli.quiet)?;
+                commands::skill::install_to_path(path, fmt, cli.quiet, args.force)?;
             } else {
                 commands::skill::install(fmt, cli.quiet, args.force)?;
             }
