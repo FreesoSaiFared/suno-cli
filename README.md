@@ -67,7 +67,10 @@ suno update            # standalone installs: self-replace from GitHub Releases
 |---|---|
 | Homebrew | Never self-replaces — tells you to run `brew upgrade paperfoot/tap/suno` |
 | Cargo | Never self-replaces — tells you to run `cargo install --locked --force suno` |
-| Standalone binary | Downloads and swaps in the latest GitHub release |
+| Standalone binary | Downloads the latest GitHub release over HTTPS and swaps it in |
+| Unrecognized | Fails closed (exit 2) rather than risk overwriting a package-manager binary — reinstall from a known channel |
+
+Standalone self-update fetches the release asset from GitHub over HTTPS. Signed-artifact / attestation verification of the downloaded binary is a tracked follow-up (see [Known limitations](#known-limitations)).
 
 After updating, run `suno skill install` to refresh the agent skill.
 
@@ -365,6 +368,10 @@ Install is idempotent (`already_current` when nothing changed). The 0.5.x spelli
 | Persona | `GET /api/persona/get-persona-paginated/{id}/` | Confirmed |
 
 Generation tasks use `/api/generate/v2-web/` with the current web request shape. Normal generation and voice-persona generation are verified; cover/remaster support is implemented but should be recaptured whenever Suno changes the web schema.
+
+## Known limitations
+
+- **Self-update artifact verification is a follow-up.** Standalone self-update downloads the release binary from GitHub over HTTPS but does not yet verify a signature or attestation on the downloaded artifact. That requires release-signing infrastructure (an embedded public key + signed release assets) and is tracked as a follow-up. Until it lands, an install source that can't be recognized fails closed instead of self-replacing.
 
 ## Contributing
 

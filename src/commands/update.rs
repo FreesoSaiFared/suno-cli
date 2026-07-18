@@ -30,6 +30,9 @@ enum InstallSource {
     Homebrew,
     Cargo,
     Standalone,
+    /// Provenance we can't classify. Self-update is disabled here (fail closed)
+    /// so we never overwrite a package-manager binary we failed to recognize.
+    Unknown,
 }
 
 impl InstallSource {
@@ -38,6 +41,7 @@ impl InstallSource {
             Self::Homebrew => "homebrew",
             Self::Cargo => "cargo",
             Self::Standalone => "standalone",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -50,8 +54,9 @@ fn detect_install_source() -> Result<InstallSource, CliError> {
             "homebrew" | "brew" => Ok(InstallSource::Homebrew),
             "cargo" => Ok(InstallSource::Cargo),
             "standalone" => Ok(InstallSource::Standalone),
+            "unknown" => Ok(InstallSource::Unknown),
             other => Err(CliError::Config(format!(
-                "invalid SUNO_INSTALL_SOURCE '{other}' (expected homebrew, cargo, or standalone)"
+                "invalid SUNO_INSTALL_SOURCE '{other}' (expected homebrew, cargo, standalone, or unknown)"
             ))),
         };
     }
@@ -112,6 +117,20 @@ fn print_result(result: &UpdateResult, fmt: OutputFormat, quiet: bool) {
 pub fn run(check: bool, force: bool, fmt: OutputFormat, quiet: bool) -> Result<(), CliError> {
     let current = env!("CARGO_PKG_VERSION");
     let source = detect_install_source()?;
+
+    if source == InstallSource::Unknown {
+        // Fail closed: we can't tell whether a self-replace would clobber a
+        // package-manager-owned binary, so refuse rather than risk it. Exit 2
+        // (setup fix), with the known reinstall channels in the message.
+        return Err(CliError::Config(
+            "cannot determine how suno was installed — refusing to self-update so a \
+             package-manager-owned binary is never overwritten. Reinstall from a known \
+             channel: `brew install paperfoot/tap/suno`, `cargo install --locked suno`, \
+             or download the release binary from \
+             https://github.com/paperfoot/suno-cli/releases"
+                .into(),
+        ));
+    }
 
     if source != InstallSource::Standalone {
         // Package-manager-owned binary: never self-replace, hand back the

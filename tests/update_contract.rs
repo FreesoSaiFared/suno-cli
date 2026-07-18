@@ -82,6 +82,27 @@ fn invalid_install_source_exits_2() {
 }
 
 #[test]
+fn unknown_source_fails_closed() {
+    // Provenance we can't classify must never self-replace: exit 2 with
+    // reinstall guidance, and the binary on disk left untouched.
+    let bin = assert_cmd::cargo::cargo_bin("suno");
+    let before = std::fs::metadata(&bin).unwrap().modified().unwrap();
+
+    let (code, stdout, stderr) = update_json("unknown", &[]);
+    assert_eq!(code, Some(2));
+    assert!(stdout.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "config_error");
+
+    let after = std::fs::metadata(&bin).unwrap().modified().unwrap();
+    assert_eq!(
+        before, after,
+        "fail-closed update must not touch the binary"
+    );
+}
+
+#[test]
 fn standalone_check_reaches_github_live() {
     // Network-touching: standalone --check queries GitHub Releases.
     if skip_live() {
