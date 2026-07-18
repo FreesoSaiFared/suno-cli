@@ -1,10 +1,37 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
+// Agents read --help to bootstrap usage; keep tips short and examples real.
+const HELP_FOOTER: &str = "\
+Tips:
+  • First run: `suno auth --login`, then `suno doctor` to verify the setup
+  • Output is a JSON envelope automatically when piped; force with --json
+  • `suno lyrics` is free; generation costs ~70 credits per call on v5.5
+  • Exit codes: 0 ok, 1 transient (retry), 2 config/auth, 3 bad input, 4 rate limited
+  • Config: `suno config path` shows the file; SUNO_* env vars override it
+  • Full machine-readable manifest: `suno agent-info | jq`
+
+Examples:
+  suno generate --title \"Weekend Code\" --tags \"indie rock, upbeat\" --lyrics-file lyrics.txt --wait --download ./songs/
+    Generate a song and download the finished MP3 (lyrics embedded)
+
+  suno describe --prompt \"a chill lo-fi track about rainy mornings\" --wait --download ./
+    Let Suno write the lyrics from a description
+
+  suno list | jq -r '.data.clips[].id'
+    List your library as JSON and extract clip IDs
+
+  suno timed-lyrics <clip_id> --lrc > song.lrc
+    Word-level synced lyrics in LRC format (raw even when piped)
+
+  suno cover <clip_id> --tags \"jazz, smooth piano\" --wait
+    Re-imagine an existing clip in a new style";
+
 #[derive(Parser)]
 #[command(
     name = "suno",
     version,
-    about = "Suno AI music generation CLI — v5.5 support"
+    about = "Suno AI music generation CLI — v5.5 support",
+    after_long_help = HELP_FOOTER
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -52,6 +79,7 @@ pub enum Commands {
     Persona(PersonaArgs),
 
     /// List your songs
+    #[command(visible_alias = "ls")]
     List(ListArgs),
 
     /// Search your songs by title or tags
@@ -61,9 +89,11 @@ pub enum Commands {
     Status(StatusArgs),
 
     /// Download audio/video for clip(s)
+    #[command(visible_alias = "dl")]
     Download(DownloadArgs),
 
     /// Delete/trash a clip
+    #[command(visible_alias = "rm")]
     Delete(DeleteArgs),
 
     /// Update clip title, lyrics, or caption
@@ -87,14 +117,28 @@ pub enum Commands {
     /// Manage configuration
     Config(ConfigArgs),
 
+    /// Check external dependencies and configuration health
+    Doctor,
+
     /// Machine-readable capabilities (for AI agents)
     AgentInfo,
 
-    /// Install the agent skill (teaches Claude Code / coding agents how to use this CLI)
+    /// Manage the agent skill (teaches Claude Code / Codex / Gemini how to use this CLI)
+    Skill(SkillArgs),
+
+    /// Back-compat alias for `skill install` (hidden)
+    #[command(hide = true)]
     InstallSkill(InstallSkillArgs),
 
-    /// Self-update from GitHub Releases
+    /// Distribution-aware update check/apply
     Update(UpdateArgs),
+
+    /// Hidden: deterministic exit-code trigger for contract tests
+    #[command(hide = true)]
+    Contract {
+        /// Exit code to trigger (0-4)
+        code: i32,
+    },
 }
 
 #[derive(clap::Args)]
@@ -102,6 +146,24 @@ pub struct UpdateArgs {
     /// Check for a new version without installing
     #[arg(long)]
     pub check: bool,
+
+    /// Bypass the duplicate-run guard
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(clap::Args)]
+pub struct SkillArgs {
+    #[command(subcommand)]
+    pub action: SkillAction,
+}
+
+#[derive(Subcommand)]
+pub enum SkillAction {
+    /// Write the skill file to all detected agent platforms
+    Install,
+    /// Check which platforms have the skill installed and current
+    Status,
 }
 
 #[derive(clap::Args)]
@@ -126,9 +188,9 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub lyrics_file: Option<String>,
 
-    /// Model version
-    #[arg(short, long, default_value = "v5.5")]
-    pub model: ModelVersion,
+    /// Model version (default: config `default_model`, v5.5 out of the box)
+    #[arg(short, long)]
+    pub model: Option<ModelVersion>,
 
     /// Vocal gender
     #[arg(long)]
@@ -150,6 +212,10 @@ pub struct GenerateArgs {
     /// Generate instrumental only (no vocals)
     #[arg(long)]
     pub instrumental: bool,
+
+    /// Bypass the duplicate-run guard
+    #[arg(long)]
+    pub force: bool,
 
     /// Wait for generation to complete
     #[arg(short, long)]
@@ -183,9 +249,9 @@ pub struct DescribeArgs {
     #[arg(long)]
     pub tags: Option<String>,
 
-    /// Model version
-    #[arg(short, long, default_value = "v5.5")]
-    pub model: ModelVersion,
+    /// Model version (default: config `default_model`, v5.5 out of the box)
+    #[arg(short, long)]
+    pub model: Option<ModelVersion>,
 
     /// Vocal gender
     #[arg(long)]
@@ -202,6 +268,10 @@ pub struct DescribeArgs {
     /// Generate instrumental only
     #[arg(long)]
     pub instrumental: bool,
+
+    /// Bypass the duplicate-run guard
+    #[arg(long)]
+    pub force: bool,
 
     /// Wait for generation to complete
     #[arg(short, long)]
@@ -248,9 +318,9 @@ pub struct ExtendArgs {
     #[arg(long)]
     pub tags: Option<String>,
 
-    /// Model version
-    #[arg(short, long, default_value = "v5.5")]
-    pub model: ModelVersion,
+    /// Model version (default: config `default_model`, v5.5 out of the box)
+    #[arg(short, long)]
+    pub model: Option<ModelVersion>,
 
     /// hCaptcha token (overrides the auto-solver)
     #[arg(long)]
@@ -284,14 +354,18 @@ pub struct CoverArgs {
     #[arg(long)]
     pub tags: Option<String>,
 
-    /// Model version for the cover
-    #[arg(short, long, default_value = "v5.5")]
-    pub model: ModelVersion,
+    /// Model version for the cover (default: config `default_model`)
+    #[arg(short, long)]
+    pub model: Option<ModelVersion>,
 
     /// Audio influence strength (0-100) — how strongly the source clip
     /// shapes the cover
     #[arg(long)]
     pub audio_influence: Option<f64>,
+
+    /// Bypass the duplicate-run guard
+    #[arg(long)]
+    pub force: bool,
 
     /// hCaptcha token (overrides the auto-solver)
     #[arg(long)]
@@ -318,6 +392,10 @@ pub struct RemasterArgs {
     /// Remaster model version
     #[arg(long, default_value = "v5.5")]
     pub model: RemasterModel,
+
+    /// Bypass the duplicate-run guard
+    #[arg(long)]
+    pub force: bool,
 
     /// hCaptcha token (overrides the auto-solver)
     #[arg(long)]
@@ -393,9 +471,9 @@ pub struct DownloadArgs {
     /// Clip ID(s) to download
     pub ids: Vec<String>,
 
-    /// Output directory
-    #[arg(short, long, default_value = ".")]
-    pub output: String,
+    /// Output directory (default: config `output_dir`, "." out of the box)
+    #[arg(short, long)]
+    pub output: Option<String>,
 
     /// Download video instead of audio
     #[arg(long)]
@@ -487,15 +565,12 @@ pub struct ConfigArgs {
 
 #[derive(clap::Args)]
 pub struct InstallSkillArgs {
-    /// Target coding agent
-    #[arg(long, default_value = "claude")]
-    pub target: SkillTarget,
-
-    /// Custom output path (overrides --target default)
+    /// Custom output path (writes a single SKILL.md there instead of the
+    /// per-platform install)
     #[arg(long)]
     pub path: Option<String>,
 
-    /// Overwrite existing skill file
+    /// Rewrite skill files even when already current
     #[arg(short, long)]
     pub force: bool,
 
@@ -504,21 +579,15 @@ pub struct InstallSkillArgs {
     pub print: bool,
 }
 
-#[derive(ValueEnum, Clone, Debug)]
-pub enum SkillTarget {
-    /// Claude Code (~/.claude/skills/suno/SKILL.md)
-    Claude,
-    /// Cursor (.cursor/rules/suno.mdc in current dir)
-    Cursor,
-}
-
 #[derive(Subcommand)]
 pub enum ConfigAction {
-    /// Show current configuration
+    /// Show the effective merged configuration (defaults < file < SUNO_* env)
     Show,
-    /// Set a configuration value
+    /// Set a configuration value in the config file
     Set { key: String, value: String },
-    /// Validate configuration
+    /// Show the configuration file path
+    Path,
+    /// Validate the configuration file
     Check,
 }
 

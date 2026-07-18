@@ -1,6 +1,7 @@
 pub mod json;
 pub mod table;
 
+#[derive(Clone, Copy)]
 pub enum OutputFormat {
     Json,
     Table,

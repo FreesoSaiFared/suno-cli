@@ -118,8 +118,9 @@ async fn ensure_chrome_running() -> Result<(), CliError> {
 }
 
 /// Locate a Chrome binary on the host. Looks in the usual macOS / Linux /
-/// Windows install paths and falls back to `$PATH`.
-fn locate_chrome() -> Result<String, CliError> {
+/// Windows install paths and falls back to `$PATH`. Also used by `doctor`
+/// to report solver availability without spawning anything.
+pub(crate) fn locate_chrome() -> Result<String, CliError> {
     if let Ok(path) = std::env::var("SUNO_CHROME_PATH")
         && !path.trim().is_empty()
     {

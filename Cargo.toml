@@ -31,11 +31,16 @@ futures-util = "0.3"
 id3 = "1"
 rookie = "0.5"
 uuid = { version = "1", features = ["v4"] }
-self_update = { version = "0.42", default-features = false, features = ["rustls", "compression-flate2", "archive-tar"] }
+self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls", "compression-flate2", "archive-tar"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+libc = "0.2"
+toml = "0.8"
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+tempfile = "3"
+figment = { version = "0.10", features = ["toml", "env", "test"] }
 
 [profile.release]
 lto = true

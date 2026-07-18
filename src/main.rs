@@ -2,9 +2,11 @@ mod api;
 mod auth;
 mod captcha;
 mod cli;
+mod commands;
 mod config;
 mod download;
 mod errors;
+mod guard;
 mod output;
 
 use clap::Parser;
@@ -19,6 +21,25 @@ use output::OutputFormat;
 async fn client() -> Result<SunoClient, CliError> {
     let auth = AuthState::load()?;
     SunoClient::new_with_refresh(auth).await
+}
+
+/// Flag > config (`default_model`, itself env-overridable) > compiled default.
+fn resolve_model(
+    flag: Option<ModelVersion>,
+    cfg: &config::AppConfig,
+) -> Result<ModelVersion, CliError> {
+    match flag {
+        Some(m) => Ok(m),
+        None => {
+            <ModelVersion as clap::ValueEnum>::from_str(&cfg.default_model, true).map_err(|_| {
+                CliError::Config(format!(
+                    "config default_model '{}' is not a valid --model value — \
+                     fix it with `suno config set default_model v5.5`",
+                    cfg.default_model
+                ))
+            })
+        }
+    }
 }
 
 fn build_tags(tags: Option<&str>, vocal: Option<&VocalGender>) -> Option<String> {
@@ -106,13 +127,15 @@ async fn resolve_captcha(
 }
 
 /// Generate, wait, optionally download with lyrics embedding.
+/// Poll timing comes from config (`poll_timeout_secs`, `poll_interval_secs`).
 async fn handle_generation(
     c: &SunoClient,
     clips: Vec<api::types::Clip>,
     wait: bool,
     download_dir: Option<&str>,
-    fmt: &OutputFormat,
+    fmt: OutputFormat,
     quiet: bool,
+    cfg: &config::AppConfig,
 ) -> Result<(), CliError> {
     let ids: Vec<String> = clips.iter().map(|c| c.id.clone()).collect();
 
@@ -120,7 +143,9 @@ async fn handle_generation(
         if !quiet {
             eprintln!("Waiting for generation to complete...");
         }
-        let final_clips = c.poll_clips(&ids, 600).await?;
+        let final_clips = c
+            .poll_clips(&ids, cfg.poll_timeout_secs, cfg.poll_interval_secs)
+            .await?;
 
         if let Some(dir) = download_dir {
             for clip in &final_clips {
@@ -186,15 +211,19 @@ async fn handle_generation(
     Ok(())
 }
 
-async fn run() -> Result<(), CliError> {
-    let cli = Cli::parse();
-    let fmt = OutputFormat::detect(cli.json);
-
+async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
     match cli.command {
         Commands::Auth(args) => {
             if args.logout {
                 AuthState::delete()?;
-                eprintln!("Logged out; removed stored Suno authentication");
+                match fmt {
+                    OutputFormat::Json => {
+                        output::json::success(serde_json::json!({ "authenticated": false }))
+                    }
+                    OutputFormat::Table => {
+                        eprintln!("Logged out; removed stored Suno authentication")
+                    }
+                }
                 return Ok(());
             }
 
@@ -293,10 +322,17 @@ async fn run() -> Result<(), CliError> {
             if should_save_after_verify {
                 state.save()?;
             }
-            eprintln!(
-                "Authenticated! Plan: {}, Credits: {}",
-                info.plan.name, info.total_credits_left
-            );
+            match fmt {
+                OutputFormat::Json => output::json::success(serde_json::json!({
+                    "authenticated": true,
+                    "plan": info.plan.name,
+                    "credits": info.total_credits_left,
+                })),
+                OutputFormat::Table => eprintln!(
+                    "Authenticated! Plan: {}, Credits: {}",
+                    info.plan.name, info.total_credits_left
+                ),
+            }
         }
 
         Commands::Credits => {
@@ -320,11 +356,21 @@ async fn run() -> Result<(), CliError> {
             match fmt {
                 // Object shape (not a bare clip array) so agents can page:
                 // feed/v3 only accepts the opaque next_cursor token.
-                OutputFormat::Json => output::json::success(serde_json::json!({
-                    "clips": feed.clips,
-                    "next_cursor": feed.next_cursor,
-                    "has_more": feed.has_more,
-                })),
+                OutputFormat::Json => {
+                    let status = if feed.clips.is_empty() {
+                        "no_results"
+                    } else {
+                        "success"
+                    };
+                    output::json::with_status(
+                        status,
+                        serde_json::json!({
+                            "clips": feed.clips,
+                            "next_cursor": feed.next_cursor,
+                            "has_more": feed.has_more,
+                        }),
+                    );
+                }
                 OutputFormat::Table => {
                     output::table::clips(&feed.clips);
                     if let Some(cursor) = feed.next_cursor.as_deref()
@@ -339,7 +385,13 @@ async fn run() -> Result<(), CliError> {
         Commands::Search(args) => {
             let feed = client().await?.search(&args.query).await?;
             match fmt {
-                OutputFormat::Json => output::json::success(&feed.clips),
+                OutputFormat::Json => {
+                    if feed.clips.is_empty() {
+                        output::json::with_status("no_results", &feed.clips);
+                    } else {
+                        output::json::success(&feed.clips);
+                    }
+                }
                 OutputFormat::Table => {
                     if feed.clips.is_empty() {
                         eprintln!("No clips matching \"{}\"", args.query);
@@ -362,6 +414,8 @@ async fn run() -> Result<(), CliError> {
         }
 
         Commands::Generate(args) => {
+            let cfg = config::AppConfig::load()?;
+            let model = resolve_model(args.model, &cfg)?;
             let lyrics = match (&args.lyrics, &args.lyrics_file) {
                 (Some(l), _) => Some(l.clone()),
                 (_, Some(path)) => Some(std::fs::read_to_string(path)?),
@@ -371,12 +425,16 @@ async fn run() -> Result<(), CliError> {
             let control_sliders =
                 build_control_sliders(args.weirdness, args.style_influence, args.audio_influence);
 
+            // Guard before any credit is spent or Chrome piloted.
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generate");
+            guard.acquire(args.force)?;
+
             let c = client().await?;
 
             // Build the new v2-web request shape. Persona generation routes
             // through the same endpoint with persona_id set; the legacy
             // task="vox" field no longer exists in the v2-web schema.
-            let mut req = GenerateRequest::new(args.model.to_api_key(), "custom");
+            let mut req = GenerateRequest::new(model.to_api_key(), "custom");
             req.prompt = lyrics.unwrap_or_default();
             req.title = args.title;
             req.tags = tags;
@@ -398,7 +456,7 @@ async fn run() -> Result<(), CliError> {
                 };
                 eprintln!(
                     "Submitting generation ({}{persona_note})...",
-                    args.model.display_name()
+                    model.display_name()
                 );
             }
             let clips = c.generate(&req).await?;
@@ -407,20 +465,26 @@ async fn run() -> Result<(), CliError> {
                 clips,
                 args.wait,
                 args.download.as_deref(),
-                &fmt,
+                fmt,
                 cli.quiet,
+                &cfg,
             )
             .await?;
         }
 
         Commands::Describe(args) => {
+            let cfg = config::AppConfig::load()?;
+            let model = resolve_model(args.model, &cfg)?;
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
             let control_sliders = build_control_sliders(args.weirdness, args.style_influence, None);
+
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "describe");
+            guard.acquire(args.force)?;
 
             // The v2-web schema dropped `gpt_description_prompt` — inspiration
             // mode is now signalled by `create_mode: "inspiration"` and the
             // text is sent in the same `prompt` field as custom mode.
-            let mut req = GenerateRequest::new(args.model.to_api_key(), "inspiration");
+            let mut req = GenerateRequest::new(model.to_api_key(), "inspiration");
             req.prompt = args.prompt;
             req.tags = tags;
             req.make_instrumental = args.instrumental;
@@ -434,7 +498,7 @@ async fn run() -> Result<(), CliError> {
             req.token_provider = token_provider;
 
             if !cli.quiet {
-                eprintln!("Submitting description ({})...", args.model.display_name());
+                eprintln!("Submitting description ({})...", model.display_name());
             }
             let clips = c.generate(&req).await?;
             handle_generation(
@@ -442,14 +506,17 @@ async fn run() -> Result<(), CliError> {
                 clips,
                 args.wait,
                 args.download.as_deref(),
-                &fmt,
+                fmt,
                 cli.quiet,
+                &cfg,
             )
             .await?;
         }
 
         Commands::Extend(args) => {
-            let mut req = GenerateRequest::new(args.model.to_api_key(), "custom");
+            let cfg = config::AppConfig::load()?;
+            let model = resolve_model(args.model, &cfg)?;
+            let mut req = GenerateRequest::new(model.to_api_key(), "custom");
             req.prompt = args.lyrics.unwrap_or_default();
             req.tags = args.tags;
             req.continue_clip_id = Some(args.clip_id);
@@ -462,7 +529,7 @@ async fn run() -> Result<(), CliError> {
             req.token_provider = token_provider;
 
             let clips = c.generate(&req).await?;
-            handle_generation(&c, clips, args.wait, None, &fmt, cli.quiet).await?;
+            handle_generation(&c, clips, args.wait, None, fmt, cli.quiet, &cfg).await?;
         }
 
         Commands::Concat(args) => {
@@ -474,18 +541,23 @@ async fn run() -> Result<(), CliError> {
         }
 
         Commands::Cover(args) => {
+            let cfg = config::AppConfig::load()?;
+            let model = resolve_model(args.model, &cfg)?;
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "cover");
+            guard.acquire(args.force)?;
+
             let c = client().await?;
             let (token, token_provider) =
                 resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
             let control_sliders = build_control_sliders(None, None, args.audio_influence);
 
             if !cli.quiet {
-                eprintln!("Creating cover ({})...", args.model.display_name());
+                eprintln!("Creating cover ({})...", model.display_name());
             }
             let clips = c
                 .cover(
                     &args.clip_id,
-                    args.model.to_api_key(),
+                    model.to_api_key(),
                     args.tags.as_deref(),
                     token,
                     token_provider,
@@ -497,13 +569,18 @@ async fn run() -> Result<(), CliError> {
                 clips,
                 args.wait,
                 args.download.as_deref(),
-                &fmt,
+                fmt,
                 cli.quiet,
+                &cfg,
             )
             .await?;
         }
 
         Commands::Remaster(args) => {
+            let cfg = config::AppConfig::load()?;
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "remaster");
+            guard.acquire(args.force)?;
+
             let c = client().await?;
             let (token, token_provider) =
                 resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
@@ -524,8 +601,9 @@ async fn run() -> Result<(), CliError> {
                 clips,
                 args.wait,
                 args.download.as_deref(),
-                &fmt,
+                fmt,
                 cli.quiet,
+                &cfg,
             )
             .await?;
         }
@@ -569,56 +647,103 @@ async fn run() -> Result<(), CliError> {
         }
 
         Commands::Download(args) => {
+            let cfg = config::AppConfig::load()?;
+            let out_dir = args.output.unwrap_or(cfg.output_dir);
             let c = client().await?;
             let clips = c.get_clips(&args.ids).await?;
             if clips.is_empty() {
                 return Err(CliError::NotFound(format!("clip: {}", args.ids.join(", "))));
             }
+
+            // IDs the feed didn't return don't exist (or aren't yours) —
+            // report them per-item instead of failing the whole batch.
+            let mut failed: Vec<serde_json::Value> = args
+                .ids
+                .iter()
+                .filter(|id| !clips.iter().any(|c| &&c.id == id))
+                .map(|id| serde_json::json!({ "id": id, "error": "not found" }))
+                .collect();
+
             let mut paths = Vec::new();
             for clip in &clips {
-                let path = download::download_clip(clip, &args.output, args.video).await?;
+                // Download + lyric-embed per clip; one bad clip (still
+                // streaming, deleted mid-batch) must not sink the rest.
+                let result: Result<String, CliError> = async {
+                    let path = download::download_clip(clip, &out_dir, args.video).await?;
+                    if !args.video {
+                        let plain_lyrics = clip.metadata.prompt.as_deref();
+                        let aligned = c.aligned_lyrics(&clip.id).await.ok();
+                        download::embed_lyrics_in_mp3(
+                            &path,
+                            &clip.title,
+                            plain_lyrics,
+                            aligned.as_deref(),
+                        )?;
+                        if !cli.quiet {
+                            eprintln!("Embedded lyrics into {path}");
+                        }
+                    }
+                    Ok(path)
+                }
+                .await;
 
-                // Embed lyrics into MP3 downloads
-                if !args.video {
-                    let plain_lyrics = clip.metadata.prompt.as_deref();
-                    let aligned = c.aligned_lyrics(&clip.id).await.ok();
-                    download::embed_lyrics_in_mp3(
-                        &path,
-                        &clip.title,
-                        plain_lyrics,
-                        aligned.as_deref(),
-                    )?;
-                    if !cli.quiet {
-                        eprintln!("Embedded lyrics into {path}");
+                match result {
+                    Ok(path) => {
+                        if !cli.quiet {
+                            eprintln!("Downloaded: {path}");
+                        }
+                        paths.push(path);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed: {} — {e}", clip.id);
+                        failed.push(serde_json::json!({
+                            "id": clip.id,
+                            "error": e.to_string(),
+                        }));
                     }
                 }
+            }
 
-                if !cli.quiet {
-                    eprintln!("Downloaded: {path}");
-                }
-                paths.push(path);
+            if paths.is_empty() && !failed.is_empty() {
+                return Err(CliError::Download(format!(
+                    "all {} download(s) failed",
+                    failed.len()
+                )));
             }
             match fmt {
-                OutputFormat::Json => output::json::success(&paths),
+                OutputFormat::Json => {
+                    let data = serde_json::json!({ "downloaded": paths, "failed": failed });
+                    if failed.is_empty() {
+                        output::json::success(data);
+                    } else {
+                        output::json::with_status("partial_success", data);
+                    }
+                }
                 OutputFormat::Table => {}
             }
         }
 
         Commands::Delete(args) => {
             if args.ids.is_empty() {
-                return Err(CliError::Config("no clip IDs provided".into()));
+                return Err(CliError::InvalidInput("no clip IDs provided".into()));
             }
+            // No interactive confirmation and no sleep-then-proceed: agents
+            // can't answer prompts, and a timed auto-proceed deletes data the
+            // caller never confirmed. Explicit -y or nothing.
             if !args.yes {
-                eprintln!(
-                    "Deleting {} clip(s): {}",
-                    args.ids.len(),
-                    args.ids.join(", ")
-                );
-                eprintln!("Use -y to skip confirmation, or press Ctrl+C to cancel");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                return Err(CliError::InvalidInput(format!(
+                    "delete requires -y to confirm — re-run: suno delete {} -y",
+                    args.ids.join(" ")
+                )));
             }
             client().await?.delete_clips(&args.ids).await?;
-            eprintln!("Deleted {} clip(s)", args.ids.len());
+            match fmt {
+                OutputFormat::Json => output::json::success(serde_json::json!({
+                    "deleted": args.ids.len(),
+                    "ids": args.ids,
+                })),
+                OutputFormat::Table => eprintln!("Deleted {} clip(s)", args.ids.len()),
+            }
         }
 
         Commands::Set(args) => {
@@ -646,9 +771,15 @@ async fn run() -> Result<(), CliError> {
                 changes.push("caption");
             }
             if args.remove_cover {
-                changes.push("cover removed");
+                changes.push("cover");
             }
-            eprintln!("Updated: {}", changes.join(", "));
+            match fmt {
+                OutputFormat::Json => output::json::success(serde_json::json!({
+                    "id": args.id,
+                    "updated": changes,
+                })),
+                OutputFormat::Table => eprintln!("Updated: {}", changes.join(", ")),
+            }
         }
 
         Commands::Publish(args) => {
@@ -658,7 +789,13 @@ async fn run() -> Result<(), CliError> {
                 c.set_visibility(id, is_public).await?;
             }
             let state = if is_public { "public" } else { "private" };
-            eprintln!("Set {} clip(s) to {state}", args.ids.len());
+            match fmt {
+                OutputFormat::Json => output::json::success(serde_json::json!({
+                    "published": args.ids,
+                    "visibility": state,
+                })),
+                OutputFormat::Table => eprintln!("Set {} clip(s) to {state}", args.ids.len()),
+            }
         }
 
         Commands::TimedLyrics(args) => {
@@ -694,245 +831,83 @@ async fn run() -> Result<(), CliError> {
 
         Commands::Config(args) => match args.action {
             ConfigAction::Show => {
-                let cfg = config::AppConfig::load();
-                println!("{}", serde_json::to_string_pretty(&cfg)?);
+                let cfg = config::AppConfig::load()?;
+                match fmt {
+                    OutputFormat::Json => output::json::success(&cfg),
+                    OutputFormat::Table => {
+                        println!("{}", serde_json::to_string_pretty(&cfg)?)
+                    }
+                }
             }
             ConfigAction::Set { key, value } => {
-                return Err(CliError::Config(format!(
-                    "`config set {key}={value}` is not yet implemented — use env vars (SUNO_{key})",
-                    key = key.to_uppercase()
-                )));
-            }
-            ConfigAction::Check => {
-                let _ = config::AppConfig::load();
-                if let Some(port) = captcha::detect_solver_chrome().await {
-                    eprintln!(
-                        "Captcha Chrome: a solver instance from a previous run is still \
-                         listening on port {port} — it will be reused; quit it via Activity \
-                         Monitor (Chrome with --remote-debugging-port={port}) if unwanted"
-                    );
+                let path = config::AppConfig::set_value(&key, &value)?;
+                match fmt {
+                    OutputFormat::Json => output::json::success(serde_json::json!({
+                        "updated": { "key": key, "value": value },
+                        "path": path.display().to_string(),
+                    })),
+                    OutputFormat::Table => {
+                        eprintln!("Set {key} = {value} in {}", path.display())
+                    }
                 }
-                match AuthState::load() {
-                    Ok(auth) => match SunoClient::new_with_refresh(auth).await {
-                        Ok(client) => {
-                            let info = client.billing_info().await?;
-                            eprintln!(
-                                "Auth: OK — {}, {} credits",
-                                info.plan.name, info.total_credits_left
-                            );
+            }
+            ConfigAction::Path => {
+                let path = config::config_path();
+                match fmt {
+                    OutputFormat::Json => output::json::success(serde_json::json!({
+                        "path": path.display().to_string(),
+                    })),
+                    OutputFormat::Table => println!("{}", path.display()),
+                }
+            }
+            // Parse-only validation; the auth/Chrome/network health checks
+            // this used to half-do live in `doctor` now.
+            ConfigAction::Check => {
+                let path = config::config_path();
+                config::AppConfig::load()?;
+                match fmt {
+                    OutputFormat::Json => output::json::success(serde_json::json!({
+                        "valid": true,
+                        "path": path.display().to_string(),
+                        "exists": path.exists(),
+                    })),
+                    OutputFormat::Table => eprintln!(
+                        "Config OK ({}{})",
+                        path.display(),
+                        if path.exists() {
+                            ""
+                        } else {
+                            " — not present, defaults apply"
                         }
-                        Err(CliError::AuthExpired) => {
-                            eprintln!("Auth: expired — run `suno auth --login`");
-                        }
-                        Err(e) => return Err(e),
-                    },
-                    Err(_) => eprintln!("Auth: not configured — run `suno auth`"),
+                    ),
                 }
             }
         },
 
+        Commands::Doctor => commands::doctor::run(fmt, cli.quiet).await?,
+
+        Commands::Skill(args) => match args.action {
+            SkillAction::Install => commands::skill::install(fmt, cli.quiet, false)?,
+            SkillAction::Status => commands::skill::status(fmt)?,
+        },
+
+        // Hidden back-compat for pre-0.6 scripts; `skill install` is the
+        // real command.
         Commands::InstallSkill(args) => {
-            const SKILL_BODY: &str = include_str!("../assets/SKILL.md");
-
             if args.print {
-                print!("{SKILL_BODY}");
-                return Ok(());
-            }
-
-            let home = directories::UserDirs::new()
-                .map(|d| d.home_dir().to_path_buf())
-                .ok_or_else(|| CliError::Config("could not determine home directory".into()))?;
-
-            let dest_path: std::path::PathBuf = if let Some(custom) = args.path {
-                if let Some(stripped) = custom.strip_prefix("~/") {
-                    home.join(stripped)
-                } else if custom == "~" {
-                    home.clone()
-                } else {
-                    std::path::PathBuf::from(custom)
-                }
+                print!("{}", commands::skill::SKILL_CONTENT);
+            } else if let Some(path) = args.path.as_deref() {
+                commands::skill::install_to_path(path, fmt, cli.quiet)?;
             } else {
-                match args.target {
-                    SkillTarget::Claude => home.join(".claude/skills/suno/SKILL.md"),
-                    SkillTarget::Cursor => std::env::current_dir()?.join(".cursor/rules/suno.mdc"),
-                }
-            };
-
-            if dest_path.exists() && !args.force {
-                return Err(CliError::Config(format!(
-                    "{} already exists — pass --force to overwrite",
-                    dest_path.display()
-                )));
-            }
-
-            if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&dest_path, SKILL_BODY)?;
-
-            match fmt {
-                OutputFormat::Json => output::json::success(serde_json::json!({
-                    "installed": true,
-                    "path": dest_path.display().to_string(),
-                    "target": match args.target {
-                        SkillTarget::Claude => "claude",
-                        SkillTarget::Cursor => "cursor",
-                    },
-                })),
-                OutputFormat::Table => {
-                    eprintln!("Installed suno skill to: {}", dest_path.display());
-                    match args.target {
-                        SkillTarget::Claude => eprintln!(
-                            "Restart Claude Code to pick up the new skill (or it loads on next session)."
-                        ),
-                        SkillTarget::Cursor => {
-                            eprintln!("Cursor will pick up the rule on next workspace reload.")
-                        }
-                    }
-                }
+                commands::skill::install(fmt, cli.quiet, args.force)?;
             }
         }
 
-        Commands::Update(args) => {
-            let current = env!("CARGO_PKG_VERSION");
-            let updater = self_update::backends::github::Update::configure()
-                .repo_owner("paperfoot")
-                .repo_name("suno-cli")
-                .bin_name("suno")
-                .show_download_progress(!cli.quiet)
-                .current_version(current)
-                .build()
-                .map_err(|e| CliError::Update(e.to_string()))?;
+        Commands::Update(args) => commands::update::run(args.check, args.force, fmt, cli.quiet)?,
 
-            if args.check {
-                let latest = updater
-                    .get_latest_release()
-                    .map_err(|e| CliError::Update(e.to_string()))?;
-                let v = latest.version.trim_start_matches('v').to_string();
-                let up_to_date = v == current;
-                let status = if up_to_date {
-                    "up_to_date"
-                } else {
-                    "update_available"
-                };
-                let result = serde_json::json!({
-                    "current_version": current,
-                    "latest_version": v,
-                    "status": status,
-                });
-                match fmt {
-                    OutputFormat::Json => output::json::success(&result),
-                    OutputFormat::Table => {
-                        if up_to_date {
-                            eprintln!("Up to date (v{current})");
-                        } else {
-                            eprintln!("Update available: v{current} -> v{v}");
-                            eprintln!("Run `suno update` to install");
-                        }
-                    }
-                }
-            } else {
-                let release = updater
-                    .update()
-                    .map_err(|e| CliError::Update(e.to_string()))?;
-                let v = release.version().trim_start_matches('v').to_string();
-                let up_to_date = v == current;
-                let status = if up_to_date { "up_to_date" } else { "updated" };
-                let result = serde_json::json!({
-                    "current_version": current,
-                    "latest_version": v,
-                    "status": status,
-                });
-                match fmt {
-                    OutputFormat::Json => output::json::success(&result),
-                    OutputFormat::Table => {
-                        if up_to_date {
-                            eprintln!("Already up to date (v{current})");
-                        } else {
-                            eprintln!("Updated: v{current} -> v{v}");
-                            eprintln!(
-                                "Run `suno install-skill --force` to refresh the agent skill"
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        Commands::Contract { code } => commands::contract::run(fmt, code)?,
 
-        Commands::AgentInfo => {
-            let auth_path = directories::ProjectDirs::from("com", "suno-cli", "suno-cli")
-                .map(|d| d.config_dir().join("auth.json").display().to_string())
-                .unwrap_or_else(|| "~/.config/suno-cli/auth.json".into());
-
-            let info = serde_json::json!({
-                "name": "suno",
-                "version": env!("CARGO_PKG_VERSION"),
-                "description": "Suno AI music generation CLI — v5.5 with voice personas, covers, remasters",
-                "commands": [
-                    "generate", "describe", "lyrics", "extend", "concat",
-                    "cover", "remaster", "stems", "info", "persona",
-                    "list", "search", "status", "download", "delete",
-                    "set", "publish", "timed-lyrics",
-                    "credits", "models", "auth", "config", "agent-info",
-                    "install-skill", "update"
-                ],
-                // Must mirror the --model ValueEnum exactly.
-                "models": {
-                    "v5.5": "chirp-fenix",
-                    "v5": "chirp-crow",
-                    "v4.5+": "chirp-bluejay",
-                    "v4.5-all": "chirp-auk-turbo",
-                    "v4.5": "chirp-auk",
-                    "v4": "chirp-v4",
-                    "v3.5": "chirp-v3-5",
-                    "v3": "chirp-v3-0",
-                    "v2": "chirp-v2-xxl-alpha",
-                },
-                "remaster_models": {
-                    "v5.5": "chirp-flounder",
-                    "v5": "chirp-carp",
-                    "v4.5+": "chirp-bass",
-                },
-                "generation_cost": {
-                    "v5.5": "~70 credits per call (35 per clip, 2 clips)",
-                    "note": "Older models cost less. `lyrics` is free.",
-                },
-                "features": [
-                    "tags", "negative_tags", "vocal_gender",
-                    "weirdness", "style_influence", "audio_influence",
-                    "instrumental", "extend", "concat", "cover", "remaster",
-                    "stems", "lyrics", "timed_lyrics", "set_metadata",
-                    "set_visibility", "search", "delete", "captcha_check",
-                    "id3_lyrics_embedding", "voice_persona", "clip_info"
-                ],
-                "exit_codes": {
-                    "0": "success",
-                    "1": "transient error (network, API) — retry",
-                    "2": "configuration error — check config",
-                    "3": "auth error — run `suno auth --login`",
-                    "4": "rate limited — wait and retry",
-                    "5": "not found — verify resource ID"
-                },
-                "env_prefix": "SUNO_",
-                "auth_path": auth_path,
-                "auth": {
-                    "recommended": "suno auth --login",
-                    "methods": [
-                        "browser_cookie_extract",
-                        "full_cookie_header",
-                        "raw_clerk_client_cookie",
-                        "direct_jwt",
-                        "stored_clerk_refresh",
-                    ],
-                    "logout": "suno auth --logout",
-                    "generation_captcha": "Generation preflights /api/c/check and skips the solver when the account is not captcha-gated (the common case). When gated, the browser-backed hCaptcha solver runs automatically. Use --no-captcha only with a valid --token or for deliberate API tests.",
-                },
-                "provider": "direct_suno_unofficial",
-                "auth_required": true,
-                "default_model": "chirp-fenix (v5.5)",
-            });
-            println!("{}", serde_json::to_string_pretty(&info)?);
-        }
+        Commands::AgentInfo => commands::agent_info::run(),
     }
 
     Ok(())
@@ -940,10 +915,43 @@ async fn run() -> Result<(), CliError> {
 
 #[tokio::main]
 async fn main() {
-    if let Err(e) = run().await {
-        let json_mode = std::env::args().any(|a| a == "--json")
-            || !std::io::IsTerminal::is_terminal(&std::io::stdout());
+    // Pre-scan argv for --json before clap runs so help, version, and parse
+    // errors honor it too (clap hasn't populated the Cli struct on those
+    // paths).
+    let json_mode = std::env::args_os().any(|a| a == "--json")
+        || !std::io::IsTerminal::is_terminal(&std::io::stdout());
 
+    // try_parse so exit codes and envelopes stay ours, not clap's: help and
+    // --version are data (exit 0, enveloped when piped), parse errors are bad
+    // input (exit 3, JSON error envelope on stderr in JSON mode).
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                if json_mode {
+                    output::json::help(e.to_string().trim_end());
+                    std::process::exit(0);
+                }
+                e.exit();
+            }
+            if json_mode {
+                output::json::error(
+                    "invalid_input",
+                    e.to_string().trim_end(),
+                    "Check arguments with `suno --help`",
+                );
+            } else {
+                eprint!("{e}");
+            }
+            std::process::exit(3);
+        }
+    };
+
+    let fmt = OutputFormat::detect(cli.json);
+    if let Err(e) = run(cli, fmt).await {
         if json_mode {
             output::json::error(e.error_code(), &e.to_string(), e.suggestion());
         } else {

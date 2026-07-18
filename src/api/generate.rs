@@ -21,14 +21,18 @@ impl SunoClient {
 
     /// Poll clip status by IDs until all are complete or errored.
     /// "streaming" means still generating — we wait for "complete".
+    /// `interval_secs` seeds the backoff (config `poll_interval_secs`),
+    /// doubling up to 15s or the seed, whichever is larger.
     pub async fn poll_clips(
         &self,
         ids: &[String],
         timeout_secs: u64,
+        interval_secs: u64,
     ) -> Result<Vec<Clip>, CliError> {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(timeout_secs);
-        let mut delay = std::time::Duration::from_secs(3);
+        let mut delay = std::time::Duration::from_secs(interval_secs.max(1));
+        let cap = std::time::Duration::from_secs(interval_secs.max(15));
 
         loop {
             let clips = self.get_clips(ids).await?;
@@ -46,7 +50,7 @@ impl SunoClient {
                 )));
             }
             tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(std::time::Duration::from_secs(15));
+            delay = (delay * 2).min(cap);
         }
     }
 

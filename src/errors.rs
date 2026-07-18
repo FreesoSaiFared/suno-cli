@@ -20,6 +20,9 @@ pub enum CliError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("Download failed: {0}")]
     Download(String),
 
@@ -40,15 +43,28 @@ pub enum CliError {
 }
 
 impl CliError {
+    /// Framework exit-code contract: 0 success, 1 transient (retry),
+    /// 2 config/auth (fix setup), 3 bad input (fix arguments, don't blind
+    /// retry), 4 rate limited. Auth errors are 2 because the fix is a setup
+    /// action (`suno auth --login`), not a retry; not-found is 3 because the
+    /// fix is a different ID. Code 5 no longer exists (breaking vs 0.5.x).
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::Config(_) => 2,
-            Self::AuthMissing | Self::AuthExpired => 3,
+            Self::Config(_) | Self::AuthMissing | Self::AuthExpired => 2,
+            Self::InvalidInput(_) | Self::NotFound(_) => 3,
             Self::RateLimited => 4,
-            Self::NotFound(_) => 5,
+            // Moderation / content-policy rejections are bad input (3) —
+            // retrying the same prompt fails identically. Everything else
+            // that failed server-side is worth a retry (1).
+            Self::GenerationFailed(msg) => {
+                if msg.to_ascii_lowercase().contains("moderat") {
+                    3
+                } else {
+                    1
+                }
+            }
             Self::Api { .. }
             | Self::Http(_)
-            | Self::GenerationFailed(_)
             | Self::Download(_)
             | Self::Update(_)
             | Self::Io(_)
@@ -63,6 +79,7 @@ impl CliError {
             Self::AuthExpired => "auth_expired",
             Self::RateLimited => "rate_limited",
             Self::Config(_) => "config_error",
+            Self::InvalidInput(_) => "invalid_input",
             Self::GenerationFailed(_) => "generation_failed",
             Self::Download(_) => "download_error",
             Self::NotFound(_) => "not_found",
@@ -80,7 +97,8 @@ impl CliError {
                 "Run `suno auth --refresh`; if that fails, run `suno auth --login`"
             }
             Self::RateLimited => "Wait 30-60 seconds and retry",
-            Self::Config(_) => "Check `suno config check` for configuration issues",
+            Self::Config(_) => "Check `suno doctor` for configuration issues",
+            Self::InvalidInput(_) => "Check arguments with `suno <command> --help`",
             Self::NotFound(_) => "Verify the ID exists with `suno list` or `suno search`",
             Self::Download(_) => {
                 "Check that the clip has finished generating with `suno status <id>`"
