@@ -291,6 +291,11 @@ pub struct ControlSliders {
 pub struct GenerateResponse {
     #[serde(default)]
     pub clips: Vec<Clip>,
+    /// Top-level submission status. Suno can return HTTP 200 with
+    /// `{"status":"error","clips":[]}` when a create is rejected server-side;
+    /// generate() must treat that as a failure, not silent success.
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 // --- Lyrics ---
