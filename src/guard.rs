@@ -21,6 +21,41 @@ struct LockFile {
 // always means a live operation.
 const STALE_THRESHOLD_SECS: i64 = 3600;
 
+/// Is `pid` a currently-running process? Probes existence without signalling.
+/// A recycled PID can read as alive (same caveat on both platforms), so this
+/// is a liveness hint, not proof — the atomic lock file is the real guard.
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    // kill(pid, 0) sends no signal; 0 means the process exists, ESRCH means it
+    // is gone. A negative/zero pid would target a process group, so reject it.
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // A dead PID yields a null handle; a live one opens (then we close it).
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            false
+        } else {
+            CloseHandle(handle);
+            true
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_alive(_pid: u32) -> bool {
+    // No portable probe: assume alive so we never reclaim a peer's live lock.
+    true
+}
+
 pub struct DuplicateGuard {
     lock_path: PathBuf,
     /// Only a guard that actually wrote the lock may delete it — otherwise a
@@ -45,7 +80,7 @@ impl DuplicateGuard {
         if let Ok(contents) = std::fs::read_to_string(&self.lock_path)
             && let Ok(lock) = serde_json::from_str::<LockFile>(&contents)
         {
-            let pid_alive = unsafe { libc::kill(lock.pid as i32, 0) == 0 };
+            let pid_alive = process_alive(lock.pid);
             // Unparseable timestamps count as stale.
             let is_stale = chrono::DateTime::parse_from_rfc3339(&lock.started_at)
                 .map(|t| {

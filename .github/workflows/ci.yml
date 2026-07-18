@@ -21,3 +21,18 @@ jobs:
       # Vendored framework contract probe (conformance/ tracks
       # paperfoot/agent-cli-framework) — the release binary must conform.
       - run: ./conformance/conformance.sh target/release/suno
+
+  # release.yml ships Windows + macOS binaries; the guard's platform-specific
+  # process-liveness (libc::kill vs OpenProcess) only compiles here, so build +
+  # test on those runners to stop a windows-msvc regression reaching a release.
+  cross-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --all-targets
+      - run: cargo test

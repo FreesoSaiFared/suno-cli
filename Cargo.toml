@@ -31,10 +31,19 @@ futures-util = "0.3"
 id3 = "1"
 rookie = "0.5"
 uuid = { version = "1", features = ["v4"] }
-self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls", "compression-flate2", "archive-tar"] }
+# archive-zip + zip-deflate: release.yml ships a .zip on Windows; self_update
+# returns ArchiveNotEnabled("zip") without them.
+self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls", "compression-flate2", "archive-tar", "archive-zip", "compression-zip-deflate"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-libc = "0.2"
 toml = "0.8"
+
+# Process-liveness for the duplicate guard is platform-specific: libc::kill on
+# Unix, OpenProcess on Windows. Gated so neither pulls onto the wrong target.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
 assert_cmd = "2"
