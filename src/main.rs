@@ -42,6 +42,14 @@ fn resolve_model(
     }
 }
 
+/// Read a caller-supplied input file (e.g. --lyrics-file). A missing or
+/// unreadable path is bad input (exit 3), not a retryable io_error (exit 1):
+/// retrying the same wrong path fails identically.
+fn read_input_file(path: &str) -> Result<String, CliError> {
+    std::fs::read_to_string(path)
+        .map_err(|e| CliError::InvalidInput(format!("cannot read input file '{path}': {e}")))
+}
+
 fn build_tags(tags: Option<&str>, vocal: Option<&VocalGender>) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     if let Some(t) = tags {
@@ -440,7 +448,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             let model = resolve_model(args.model, &cfg)?;
             let lyrics = match (&args.lyrics, &args.lyrics_file) {
                 (Some(l), _) => Some(l.clone()),
-                (_, Some(path)) => Some(std::fs::read_to_string(path)?),
+                (_, Some(path)) => Some(read_input_file(path)?),
                 _ => None,
             };
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
@@ -532,6 +540,12 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         Commands::Extend(args) => {
             let cfg = config::AppConfig::load()?;
             let model = resolve_model(args.model, &cfg)?;
+
+            // extend spends credits through the same v2-web create as generate,
+            // so it gets the same duplicate guard before any credit is spent.
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "extend");
+            guard.acquire(args.force)?;
+
             let mut req = GenerateRequest::new(model.to_api_key(), "custom");
             req.prompt = args.lyrics.unwrap_or_default();
             req.tags = args.tags;
@@ -754,7 +768,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         Commands::Set(args) => {
             let lyrics = match (&args.lyrics, &args.lyrics_file) {
                 (Some(l), _) => Some(l.clone()),
-                (_, Some(path)) => Some(std::fs::read_to_string(path)?),
+                (_, Some(path)) => Some(read_input_file(path)?),
                 _ => None,
             };
             let req = SetMetadataRequest {

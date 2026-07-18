@@ -63,6 +63,38 @@ fn unknown_flag_exits_3() {
         .code(3);
 }
 
+// ── Required positionals: an empty ID list is bad input, not an auth call ────
+
+#[test]
+fn status_without_ids_exits_3() {
+    // Missing required IDs must fail at parse (exit 3), never reach the API.
+    suno().arg("status").assert().code(3);
+}
+
+#[test]
+fn download_without_ids_exits_3() {
+    suno().arg("download").assert().code(3);
+}
+
+#[test]
+fn publish_without_ids_exits_3() {
+    suno().arg("publish").assert().code(3);
+}
+
+// ── Dead flags stay dead ─────────────────────────────────────────────────────
+
+#[test]
+fn stems_wait_flag_removed_exits_3() {
+    // stems accepted but ignored --wait; the flag is gone, so passing it is an
+    // unknown-flag parse error rather than a silent no-op.
+    suno().args(["stems", "abc", "--wait"]).assert().code(3);
+}
+
+#[test]
+fn concat_wait_flag_removed_exits_3() {
+    suno().args(["concat", "abc", "--wait"]).assert().code(3);
+}
+
 #[test]
 fn agent_info_exits_0() {
     suno().arg("agent-info").assert().code(0);

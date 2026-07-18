@@ -38,6 +38,33 @@ fn every_listed_command_is_routable() {
 }
 
 #[test]
+fn advertised_options_exist_in_help() {
+    // Assert the manifest's options against the real clap surface, not just
+    // routability: every advertised long flag must appear in that command's
+    // --help. Catches manifest drift (e.g. extend's new --force) and dead
+    // flags the manifest never should have listed.
+    let info = agent_info();
+    for (cmd, spec) in info["commands"].as_object().unwrap() {
+        let Some(options) = spec["options"].as_array() else {
+            continue;
+        };
+        let mut args: Vec<&str> = cmd.split_whitespace().collect();
+        args.push("--help");
+        let out = suno().args(&args).output().unwrap();
+        let help = String::from_utf8_lossy(&out.stdout);
+        for opt in options {
+            let name = opt["name"].as_str().unwrap();
+            if name.starts_with("--") {
+                assert!(
+                    help.contains(name),
+                    "manifest advertises {name} for `{cmd}` but --help does not show it"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn exit_codes_cover_0_to_4_and_5_is_gone() {
     let info = agent_info();
     let codes = info["exit_codes"].as_object().unwrap();

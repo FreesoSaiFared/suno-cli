@@ -330,6 +330,10 @@ pub struct ExtendArgs {
     #[arg(long)]
     pub no_captcha: bool,
 
+    /// Bypass the duplicate-run guard
+    #[arg(long)]
+    pub force: bool,
+
     /// Wait for completion
     #[arg(short, long)]
     pub wait: bool,
@@ -339,10 +343,6 @@ pub struct ExtendArgs {
 pub struct ConcatArgs {
     /// Clip ID to concatenate into a full song
     pub clip_id: String,
-
-    /// Wait for completion
-    #[arg(short, long)]
-    pub wait: bool,
 }
 
 #[derive(clap::Args)]
@@ -430,10 +430,6 @@ pub struct PersonaArgs {
 pub struct StemsArgs {
     /// Clip ID to extract stems from
     pub clip_id: String,
-
-    /// Wait for completion
-    #[arg(short, long)]
-    pub wait: bool,
 }
 
 #[derive(clap::Args)]
@@ -463,12 +459,14 @@ pub struct DeleteArgs {
 #[derive(clap::Args)]
 pub struct StatusArgs {
     /// Clip ID(s) to check
+    #[arg(required = true, num_args = 1..)]
     pub ids: Vec<String>,
 }
 
 #[derive(clap::Args)]
 pub struct DownloadArgs {
     /// Clip ID(s) to download
+    #[arg(required = true, num_args = 1..)]
     pub ids: Vec<String>,
 
     /// Output directory (default: config `output_dir`, "." out of the box)
@@ -509,6 +507,7 @@ pub struct SetArgs {
 #[derive(clap::Args)]
 pub struct PublishArgs {
     /// Clip ID(s)
+    #[arg(required = true, num_args = 1..)]
     pub ids: Vec<String>,
 
     /// Make public (default) or --private

@@ -131,7 +131,7 @@ fn command_map() -> serde_json::Map<String, Value> {
                     {"name": "--at", "type": "number", "required": true, "description": "Timestamp in seconds to continue from"},
                     {"name": "--lyrics", "type": "string", "required": false, "description": "New lyrics for the extension"},
                     {"name": "--tags", "type": "string", "required": false, "description": "Style tags"},
-                    model_option, wait_option, token_option, no_captcha_option
+                    model_option, wait_option, token_option, no_captcha_option, force_option
                 ]
             }),
         ),
