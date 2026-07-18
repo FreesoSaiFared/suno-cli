@@ -138,6 +138,12 @@ pub fn run(check: bool, force: bool, fmt: OutputFormat, quiet: bool) -> Result<(
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
         .bin_name("suno")
+        // self_update defaults chatter release info to stdout and prompt on
+        // stdin — both break the envelope contract (stdout carries only the
+        // JSON envelope; piped consumers exiting early would EPIPE-panic the
+        // chatter). Download progress draws to stderr and may stay.
+        .show_output(false)
+        .no_confirm(true)
         .show_download_progress(!quiet)
         .current_version(current)
         .build()

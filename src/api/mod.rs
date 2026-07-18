@@ -197,6 +197,15 @@ impl SunoClient {
         if status == 429 {
             return Err(CliError::RateLimited);
         }
+        if status == 404 {
+            // Suno serves an HTML 404 for unknown IDs (trash/set/publish with
+            // a bogus UUID). Permanent failure — NotFound (exit 3) so agents
+            // fix the ID instead of retrying an api_error.
+            return Err(CliError::NotFound(format!(
+                "{} (HTTP 404)",
+                resp.url().path()
+            )));
+        }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             // Map known Suno error patterns to actionable codes so callers
