@@ -2,16 +2,26 @@ use serde::{Deserialize, Serialize};
 
 // --- Billing / Account ---
 
+/// Only `total_credits_left` and `plan` are load-bearing (auth verify,
+/// credits display). Everything else defaults so one renamed/removed field
+/// in Suno's billing response doesn't break credits+models+auth at once.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct BillingInfo {
+    #[serde(default)]
     pub credits: u64,
     pub total_credits_left: u64,
+    #[serde(default)]
     pub monthly_usage: u64,
+    #[serde(default)]
     pub monthly_limit: u64,
+    #[serde(default)]
     pub is_active: bool,
     pub plan: Plan,
+    #[serde(default)]
     pub models: Vec<Model>,
+    #[serde(default)]
     pub period: String,
+    #[serde(default)]
     pub renews_on: Option<String>,
     #[serde(default)]
     pub remaster_model_types: Vec<RemasterModelInfo>,
@@ -20,6 +30,7 @@ pub struct BillingInfo {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Plan {
     pub name: String,
+    #[serde(default)]
     pub plan_key: String,
     #[serde(default)]
     pub usage_plan_features: Vec<Feature>,
@@ -34,8 +45,11 @@ pub struct Feature {
 pub struct Model {
     pub name: String,
     pub external_key: String,
+    #[serde(default)]
     pub can_use: bool,
+    #[serde(default)]
     pub is_default_model: bool,
+    #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub max_lengths: MaxLengths,
@@ -100,16 +114,21 @@ pub struct ClipMetadata {
     pub make_instrumental: bool,
     #[serde(rename = "type")]
     pub clip_type: Option<String>,
+    /// Set by Suno when a clip lands in `status == "error"` (moderation,
+    /// internal failure). Skipped on output so healthy clips keep their shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct FeedResponse {
     #[serde(default)]
     pub clips: Vec<Clip>,
-    #[allow(dead_code)]
+    /// Opaque pagination token — pass back via `list --cursor`.
     pub next_cursor: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub has_more: bool,
 }
 
@@ -155,9 +174,12 @@ pub struct FilterPresence {
 
 #[derive(Debug, Serialize)]
 pub struct GenerateRequest {
-    /// Captcha/anti-bot token. Generation normally needs a fresh hCaptcha
-    /// response from the browser-backed solver unless the caller supplies one.
+    /// Captcha/anti-bot token. Only needed when `/api/c/check` says the
+    /// account is captcha-gated; `null` otherwise (matches the web app).
     pub token: Option<String>,
+    /// Captcha scheme for `token` — `"hcaptcha"` when a solved token is
+    /// attached, `null` otherwise. July-2026 clients send both fields.
+    pub token_provider: Option<String>,
     pub generation_type: String,
     pub title: Option<String>,
     pub tags: Option<String>,
@@ -191,6 +213,7 @@ impl GenerateRequest {
     pub fn new(mv: &str, create_mode: &str) -> Self {
         Self {
             token: None,
+            token_provider: None,
             generation_type: "TEXT".to_string(),
             title: None,
             tags: None,
@@ -257,9 +280,13 @@ pub struct ControlSliders {
     /// Weirdness: 0.0-1.0 (maps from 0-100 in UI)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weirdness_constraint: Option<f64>,
-    /// Style weight: 0.0-1.0 (maps from 0-90 in UI)
+    /// Style weight: 0.0-1.0 (maps from 0-100 in UI)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_weight: Option<f64>,
+    /// Audio influence: 0.0-1.0 (maps from 0-100 in UI) — how strongly the
+    /// source audio shapes covers/remixes. Field name confirmed in the wild.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_weight: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,13 +330,15 @@ pub struct AlignedWord {
 
 // --- Captcha Check ---
 
-#[allow(dead_code)]
+/// `POST /api/c/check` with `{"ctype":"generation"}` — verified live
+/// 2026-07-18: `{"required": false, "captcha_version": 1}` for accounts
+/// above Suno's trust threshold.
 #[derive(Debug, Deserialize)]
 pub struct CaptchaCheckResponse {
     #[serde(default)]
-    pub captcha_required: bool,
+    pub required: bool,
     #[serde(default)]
-    pub captcha_url: Option<String>,
+    pub captcha_version: Option<i64>,
 }
 
 // --- Set Metadata ---
@@ -363,4 +392,82 @@ pub struct PersonaInfo {
     pub user_handle: Option<String>,
     #[serde(default)]
     pub persona_clips: Vec<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_request_sends_token_provider() {
+        let mut req = GenerateRequest::new("chirp-fenix", "custom");
+        let v = serde_json::to_value(&req).unwrap();
+        // Both fields must be present as null when no captcha token is
+        // attached — matches July-2026 web clients.
+        assert_eq!(v["token"], serde_json::Value::Null);
+        assert_eq!(v["token_provider"], serde_json::Value::Null);
+
+        req.token = Some("solved".into());
+        req.token_provider = Some("hcaptcha".into());
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["token"], "solved");
+        assert_eq!(v["token_provider"], "hcaptcha");
+    }
+
+    #[test]
+    fn feed_request_cursor_plumbing() {
+        // feed/v3 wants an opaque cursor token, omitted entirely on page one.
+        let req = FeedV3Request {
+            cursor: Some("opaque-token".into()),
+            limit: Some(20),
+            filters: None,
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["cursor"], "opaque-token");
+
+        let req = FeedV3Request {
+            cursor: None,
+            limit: None,
+            filters: None,
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert!(v.get("cursor").is_none());
+    }
+
+    #[test]
+    fn captcha_check_response_parses_required_field() {
+        // Live shape verified 2026-07-18. The old struct expected a
+        // `captcha_required` field that the API never sends.
+        let r: CaptchaCheckResponse =
+            serde_json::from_str(r#"{"required": false, "captcha_version": 1}"#).unwrap();
+        assert!(!r.required);
+        assert_eq!(r.captcha_version, Some(1));
+
+        let r: CaptchaCheckResponse = serde_json::from_str(r#"{"required": true}"#).unwrap();
+        assert!(r.required);
+        assert_eq!(r.captcha_version, None);
+    }
+
+    #[test]
+    fn control_sliders_serialize_audio_weight() {
+        let s = ControlSliders {
+            weirdness_constraint: None,
+            style_weight: None,
+            audio_weight: Some(0.65),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["audio_weight"], 0.65);
+        assert!(v.get("weirdness_constraint").is_none());
+    }
+
+    #[test]
+    fn billing_info_tolerates_missing_noncritical_fields() {
+        // Only total_credits_left and plan are required.
+        let r: BillingInfo =
+            serde_json::from_str(r#"{"total_credits_left": 500, "plan": {"name": "Premier"}}"#)
+                .unwrap();
+        assert_eq!(r.total_credits_left, 500);
+        assert_eq!(r.plan.name, "Premier");
+        assert!(r.models.is_empty());
+    }
 }

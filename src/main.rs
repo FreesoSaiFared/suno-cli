@@ -38,20 +38,71 @@ fn build_tags(tags: Option<&str>, vocal: Option<&VocalGender>) -> Option<String>
     }
 }
 
-/// Build a control_sliders block when --weirdness or --style-influence is set.
-/// Returns None when neither is provided so we don't pollute the request.
+/// Build a control_sliders block when any slider flag is set.
+/// Returns None when none is provided so we don't pollute the request.
 fn build_control_sliders(
     weirdness: Option<f64>,
     style_influence: Option<f64>,
+    audio_influence: Option<f64>,
 ) -> Option<ControlSliders> {
-    if weirdness.is_none() && style_influence.is_none() {
+    if weirdness.is_none() && style_influence.is_none() && audio_influence.is_none() {
         return None;
     }
     Some(ControlSliders {
         // Normalize 0-100 → 0.0-1.0
         weirdness_constraint: weirdness.map(|w| (w / 100.0).clamp(0.0, 1.0)),
         style_weight: style_influence.map(|s| (s / 100.0).clamp(0.0, 1.0)),
+        audio_weight: audio_influence.map(|a| (a / 100.0).clamp(0.0, 1.0)),
     })
+}
+
+/// Resolve the captcha token for the five captcha-gated v2-web commands
+/// (generate, describe, extend, cover, remaster). Returns
+/// `(token, token_provider)` for the request body.
+///
+/// An explicit --token wins (assumed hCaptcha-solved); --no-captcha means
+/// never solve. Otherwise preflight `/api/c/check` — most accounts are above
+/// Suno's trust threshold and need no captcha, so we skip the Chrome solver
+/// entirely. A preflight failure falls back to solving (never a hard gate).
+async fn resolve_captcha(
+    c: &SunoClient,
+    token: Option<String>,
+    no_captcha: bool,
+    quiet: bool,
+) -> Result<(Option<String>, Option<String>), CliError> {
+    if let Some(t) = token {
+        return Ok((Some(t), Some("hcaptcha".to_string())));
+    }
+    if no_captcha {
+        return Ok((None, None));
+    }
+
+    let check = c.captcha_check("generation").await;
+    let required = match &check {
+        Ok(resp) => resp.required,
+        Err(_) => true,
+    };
+    if !required {
+        if !quiet {
+            eprintln!("Captcha not required — skipping solver");
+        }
+        return Ok((None, None));
+    }
+
+    if !quiet {
+        match check.ok().and_then(|r| r.captcha_version) {
+            Some(v) => eprintln!("Captcha required (version {v}) — solving via piloted Chrome..."),
+            None => eprintln!("Solving hCaptcha via piloted Chrome..."),
+        }
+    }
+    let auth = AuthState::load()?;
+    let solved = captcha::solve(&auth).await.map_err(|e| {
+        CliError::GenerationFailed(format!(
+            "captcha solve failed: {e} — Suno is enforcing a captcha on this account; \
+             generate one song in the suno.com UI to clear the challenge, then retry"
+        ))
+    })?;
+    Ok((Some(solved), Some("hcaptcha".to_string())))
 }
 
 /// Generate, wait, optionally download with lyrics embedding.
@@ -92,6 +143,29 @@ async fn handle_generation(
                     }
                 }
             }
+        }
+
+        // A clip that polled to "error" is a failed generation — exit
+        // non-zero so agents don't treat moderation rejections and internal
+        // failures as success. Completed siblings were already downloaded.
+        let failed: Vec<String> = final_clips
+            .iter()
+            .filter(|c| c.status == "error")
+            .map(|c| {
+                let reason = c
+                    .metadata
+                    .error_message
+                    .as_deref()
+                    .or(c.metadata.error_type.as_deref())
+                    .unwrap_or("unknown error");
+                format!("{} ({reason})", c.id)
+            })
+            .collect();
+        if !failed.is_empty() {
+            return Err(CliError::GenerationFailed(format!(
+                "clip(s) errored: {}",
+                failed.join("; ")
+            )));
         }
 
         match fmt {
@@ -242,10 +316,23 @@ async fn run() -> Result<(), CliError> {
         }
 
         Commands::List(args) => {
-            let feed = client().await?.feed(args.page).await?;
+            let feed = client().await?.feed(args.cursor).await?;
             match fmt {
-                OutputFormat::Json => output::json::success(&feed.clips),
-                OutputFormat::Table => output::table::clips(&feed.clips),
+                // Object shape (not a bare clip array) so agents can page:
+                // feed/v3 only accepts the opaque next_cursor token.
+                OutputFormat::Json => output::json::success(serde_json::json!({
+                    "clips": feed.clips,
+                    "next_cursor": feed.next_cursor,
+                    "has_more": feed.has_more,
+                })),
+                OutputFormat::Table => {
+                    output::table::clips(&feed.clips);
+                    if let Some(cursor) = feed.next_cursor.as_deref()
+                        && feed.has_more
+                    {
+                        eprintln!("\nNext page: suno list --cursor {cursor}");
+                    }
+                }
             }
         }
 
@@ -281,7 +368,8 @@ async fn run() -> Result<(), CliError> {
                 _ => None,
             };
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
-            let control_sliders = build_control_sliders(args.weirdness, args.style_influence);
+            let control_sliders =
+                build_control_sliders(args.weirdness, args.style_influence, args.audio_influence);
 
             let c = client().await?;
 
@@ -297,20 +385,10 @@ async fn run() -> Result<(), CliError> {
             req.persona_id = args.persona.clone();
             req.metadata.control_sliders = control_sliders;
 
-            // Solve hCaptcha. Suno gates v2-web with an invisible challenge
-            // — only a real piloted Chrome can pass it. The user can override
-            // by passing --token explicitly (e.g. from a 2Captcha solution).
-            req.token = if let Some(t) = args.token {
-                Some(t)
-            } else if !args.no_captcha {
-                if !cli.quiet {
-                    eprintln!("Solving hCaptcha via piloted Chrome...");
-                }
-                let auth = AuthState::load()?;
-                Some(captcha::solve(&auth).await?)
-            } else {
-                None
-            };
+            let (token, token_provider) =
+                resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            req.token = token;
+            req.token_provider = token_provider;
 
             if !cli.quiet {
                 let persona_note = if args.persona.is_some() {
@@ -337,7 +415,7 @@ async fn run() -> Result<(), CliError> {
 
         Commands::Describe(args) => {
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
-            let control_sliders = build_control_sliders(args.weirdness, args.style_influence);
+            let control_sliders = build_control_sliders(args.weirdness, args.style_influence, None);
 
             // The v2-web schema dropped `gpt_description_prompt` — inspiration
             // mode is now signalled by `create_mode: "inspiration"` and the
@@ -349,19 +427,15 @@ async fn run() -> Result<(), CliError> {
             req.persona_id = args.persona.clone();
             req.metadata.control_sliders = control_sliders;
 
-            // Same captcha auto-solve as generate.
-            if !args.no_captcha {
-                if !cli.quiet {
-                    eprintln!("Solving hCaptcha via piloted Chrome...");
-                }
-                let auth = AuthState::load()?;
-                req.token = Some(captcha::solve(&auth).await?);
-            }
+            let c = client().await?;
+            let (token, token_provider) =
+                resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            req.token = token;
+            req.token_provider = token_provider;
 
             if !cli.quiet {
                 eprintln!("Submitting description ({})...", args.model.display_name());
             }
-            let c = client().await?;
             let clips = c.generate(&req).await?;
             handle_generation(
                 &c,
@@ -375,13 +449,18 @@ async fn run() -> Result<(), CliError> {
         }
 
         Commands::Extend(args) => {
-            let mut req = GenerateRequest::new("chirp-fenix", "custom");
+            let mut req = GenerateRequest::new(args.model.to_api_key(), "custom");
             req.prompt = args.lyrics.unwrap_or_default();
             req.tags = args.tags;
             req.continue_clip_id = Some(args.clip_id);
             req.continue_at = Some(args.at);
 
             let c = client().await?;
+            let (token, token_provider) =
+                resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            req.token = token;
+            req.token_provider = token_provider;
+
             let clips = c.generate(&req).await?;
             handle_generation(&c, clips, args.wait, None, &fmt, cli.quiet).await?;
         }
@@ -395,12 +474,23 @@ async fn run() -> Result<(), CliError> {
         }
 
         Commands::Cover(args) => {
+            let c = client().await?;
+            let (token, token_provider) =
+                resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            let control_sliders = build_control_sliders(None, None, args.audio_influence);
+
             if !cli.quiet {
                 eprintln!("Creating cover ({})...", args.model.display_name());
             }
-            let c = client().await?;
             let clips = c
-                .cover(&args.clip_id, args.model.to_api_key(), args.tags.as_deref())
+                .cover(
+                    &args.clip_id,
+                    args.model.to_api_key(),
+                    args.tags.as_deref(),
+                    token,
+                    token_provider,
+                    control_sliders,
+                )
                 .await?;
             handle_generation(
                 &c,
@@ -414,11 +504,21 @@ async fn run() -> Result<(), CliError> {
         }
 
         Commands::Remaster(args) => {
+            let c = client().await?;
+            let (token, token_provider) =
+                resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+
             if !cli.quiet {
                 eprintln!("Remastering with {}...", args.model.to_api_key());
             }
-            let c = client().await?;
-            let clips = c.remaster(&args.clip_id, args.model.to_api_key()).await?;
+            let clips = c
+                .remaster(
+                    &args.clip_id,
+                    args.model.to_api_key(),
+                    token,
+                    token_provider,
+                )
+                .await?;
             handle_generation(
                 &c,
                 clips,
@@ -472,10 +572,7 @@ async fn run() -> Result<(), CliError> {
             let c = client().await?;
             let clips = c.get_clips(&args.ids).await?;
             if clips.is_empty() {
-                return Err(CliError::NotFound(format!(
-                    "clips: {}",
-                    args.ids.join(", ")
-                )));
+                return Err(CliError::NotFound(format!("clip: {}", args.ids.join(", "))));
             }
             let mut paths = Vec::new();
             for clip in &clips {
@@ -566,6 +663,11 @@ async fn run() -> Result<(), CliError> {
 
         Commands::TimedLyrics(args) => {
             let words = client().await?.aligned_lyrics(&args.id).await?;
+            // Empty stdout with exit 0 is correct (instrumentals have no
+            // alignment) but reads like a silent failure — say why on stderr.
+            if words.iter().all(|w| !w.success) && !cli.quiet {
+                eprintln!("No timed lyrics available (instrumental or not yet aligned)");
+            }
             if args.lrc {
                 // LRC format: [mm:ss.xx] word
                 for w in &words {
@@ -603,6 +705,13 @@ async fn run() -> Result<(), CliError> {
             }
             ConfigAction::Check => {
                 let _ = config::AppConfig::load();
+                if let Some(port) = captcha::detect_solver_chrome().await {
+                    eprintln!(
+                        "Captcha Chrome: a solver instance from a previous run is still \
+                         listening on port {port} — it will be reused; quit it via Activity \
+                         Monitor (Chrome with --remote-debugging-port={port}) if unwanted"
+                    );
+                }
                 match AuthState::load() {
                     Ok(auth) => match SunoClient::new_with_refresh(auth).await {
                         Ok(client) => {
@@ -767,21 +876,30 @@ async fn run() -> Result<(), CliError> {
                     "credits", "models", "auth", "config", "agent-info",
                     "install-skill", "update"
                 ],
+                // Must mirror the --model ValueEnum exactly.
                 "models": {
                     "v5.5": "chirp-fenix",
                     "v5": "chirp-crow",
                     "v4.5+": "chirp-bluejay",
+                    "v4.5-all": "chirp-auk-turbo",
                     "v4.5": "chirp-auk",
                     "v4": "chirp-v4",
+                    "v3.5": "chirp-v3-5",
+                    "v3": "chirp-v3-0",
+                    "v2": "chirp-v2-xxl-alpha",
                 },
                 "remaster_models": {
                     "v5.5": "chirp-flounder",
                     "v5": "chirp-carp",
                     "v4.5+": "chirp-bass",
                 },
+                "generation_cost": {
+                    "v5.5": "~70 credits per call (35 per clip, 2 clips)",
+                    "note": "Older models cost less. `lyrics` is free.",
+                },
                 "features": [
                     "tags", "negative_tags", "vocal_gender",
-                    "weirdness", "style_influence",
+                    "weirdness", "style_influence", "audio_influence",
                     "instrumental", "extend", "concat", "cover", "remaster",
                     "stems", "lyrics", "timed_lyrics", "set_metadata",
                     "set_visibility", "search", "delete", "captcha_check",
@@ -807,7 +925,7 @@ async fn run() -> Result<(), CliError> {
                         "stored_clerk_refresh",
                     ],
                     "logout": "suno auth --logout",
-                    "generation_captcha": "Default generation uses the browser-backed hCaptcha solver. Use --no-captcha only with a valid --token or for deliberate API tests.",
+                    "generation_captcha": "Generation preflights /api/c/check and skips the solver when the account is not captcha-gated (the common case). When gated, the browser-backed hCaptcha solver runs automatically. Use --no-captcha only with a valid --token or for deliberate API tests.",
                 },
                 "provider": "direct_suno_unofficial",
                 "auth_required": true,
@@ -833,5 +951,36 @@ async fn main() {
             eprintln!("Hint: {}", e.suggestion());
         }
         std::process::exit(e.exit_code());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_sliders_normalize_and_clamp() {
+        let s = build_control_sliders(Some(50.0), Some(150.0), Some(0.0)).unwrap();
+        assert_eq!(s.weirdness_constraint, Some(0.5));
+        // Out-of-range input clamps rather than sending >1.0 to the API.
+        assert_eq!(s.style_weight, Some(1.0));
+        assert_eq!(s.audio_weight, Some(0.0));
+
+        // No flags → no block at all, so the request stays clean.
+        assert!(build_control_sliders(None, None, None).is_none());
+
+        // A lone --audio-influence still produces a block.
+        let s = build_control_sliders(None, None, Some(65.0)).unwrap();
+        assert_eq!(s.audio_weight, Some(0.65));
+        assert_eq!(s.weirdness_constraint, None);
+    }
+
+    #[test]
+    fn tags_merge_vocal_gender() {
+        assert_eq!(
+            build_tags(Some("pop"), Some(&VocalGender::Female)).as_deref(),
+            Some("pop, female vocals")
+        );
+        assert_eq!(build_tags(None, None), None);
     }
 }

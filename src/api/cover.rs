@@ -1,5 +1,5 @@
 use super::SunoClient;
-use super::types::{Clip, GenerateRequest};
+use super::types::{Clip, ControlSliders, GenerateRequest};
 use crate::errors::CliError;
 
 impl SunoClient {
@@ -14,10 +14,16 @@ impl SunoClient {
         clip_id: &str,
         model_key: &str,
         tags: Option<&str>,
+        token: Option<String>,
+        token_provider: Option<String>,
+        control_sliders: Option<ControlSliders>,
     ) -> Result<Vec<Clip>, CliError> {
         let mut req = GenerateRequest::new(model_key, "cover");
         req.tags = tags.map(String::from);
         req.cover_clip_id = Some(clip_id.to_string());
+        req.token = token;
+        req.token_provider = token_provider;
+        req.metadata.control_sliders = control_sliders;
         self.generate(&req).await
     }
 }

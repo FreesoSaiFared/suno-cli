@@ -142,9 +142,10 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub style_influence: Option<f64>,
 
-    /// Variation level
+    /// Audio influence strength (0-100) — how strongly source audio shapes
+    /// the output
     #[arg(long)]
-    pub variation: Option<VariationCategory>,
+    pub audio_influence: Option<f64>,
 
     /// Generate instrumental only (no vocals)
     #[arg(long)]
@@ -210,6 +211,10 @@ pub struct DescribeArgs {
     #[arg(long)]
     pub download: Option<String>,
 
+    /// hCaptcha token (overrides the auto-solver)
+    #[arg(long)]
+    pub token: Option<String>,
+
     /// Skip the built-in hCaptcha auto-solver
     #[arg(long)]
     pub no_captcha: bool,
@@ -243,6 +248,18 @@ pub struct ExtendArgs {
     #[arg(long)]
     pub tags: Option<String>,
 
+    /// Model version
+    #[arg(short, long, default_value = "v5.5")]
+    pub model: ModelVersion,
+
+    /// hCaptcha token (overrides the auto-solver)
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Skip the built-in hCaptcha auto-solver
+    #[arg(long)]
+    pub no_captcha: bool,
+
     /// Wait for completion
     #[arg(short, long)]
     pub wait: bool,
@@ -271,6 +288,19 @@ pub struct CoverArgs {
     #[arg(short, long, default_value = "v5.5")]
     pub model: ModelVersion,
 
+    /// Audio influence strength (0-100) — how strongly the source clip
+    /// shapes the cover
+    #[arg(long)]
+    pub audio_influence: Option<f64>,
+
+    /// hCaptcha token (overrides the auto-solver)
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Skip the built-in hCaptcha auto-solver
+    #[arg(long)]
+    pub no_captcha: bool,
+
     /// Wait for completion
     #[arg(short, long)]
     pub wait: bool,
@@ -288,6 +318,14 @@ pub struct RemasterArgs {
     /// Remaster model version
     #[arg(long, default_value = "v5.5")]
     pub model: RemasterModel,
+
+    /// hCaptcha token (overrides the auto-solver)
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Skip the built-in hCaptcha auto-solver
+    #[arg(long)]
+    pub no_captcha: bool,
 
     /// Wait for completion
     #[arg(short, long)]
@@ -322,9 +360,10 @@ pub struct StemsArgs {
 
 #[derive(clap::Args)]
 pub struct ListArgs {
-    /// Page number (0-indexed)
-    #[arg(short, long, default_value = "0")]
-    pub page: u32,
+    /// Opaque pagination cursor from a previous `list --json` response
+    /// (`next_cursor`). Omit for the first page.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -492,6 +531,8 @@ pub enum ModelVersion {
     V5,
     #[value(name = "v4.5+")]
     V45Plus,
+    #[value(name = "v4.5-all")]
+    V45All,
     #[value(name = "v4.5")]
     V45,
     #[value(name = "v4")]
@@ -510,6 +551,7 @@ impl ModelVersion {
             Self::V55 => "chirp-fenix",
             Self::V5 => "chirp-crow",
             Self::V45Plus => "chirp-bluejay",
+            Self::V45All => "chirp-auk-turbo",
             Self::V45 => "chirp-auk",
             Self::V4 => "chirp-v4",
             Self::V35 => "chirp-v3-5",
@@ -523,6 +565,7 @@ impl ModelVersion {
             Self::V55 => "v5.5",
             Self::V5 => "v5",
             Self::V45Plus => "v4.5+",
+            Self::V45All => "v4.5-all",
             Self::V45 => "v4.5",
             Self::V4 => "v4",
             Self::V35 => "v3.5",
@@ -536,24 +579,6 @@ impl ModelVersion {
 pub enum VocalGender {
     Male,
     Female,
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-pub enum VariationCategory {
-    High,
-    Normal,
-    Subtle,
-}
-
-impl VariationCategory {
-    #[allow(dead_code)]
-    pub fn to_api_value(&self) -> &'static str {
-        match self {
-            Self::High => "high",
-            Self::Normal => "normal",
-            Self::Subtle => "subtle",
-        }
-    }
 }
 
 #[derive(ValueEnum, Clone, Debug, Default)]
@@ -573,6 +598,34 @@ impl RemasterModel {
             Self::V55 => "chirp-flounder",
             Self::V5 => "chirp-carp",
             Self::V45Plus => "chirp-bass",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::ValueEnum;
+
+    #[test]
+    fn model_versions_map_to_api_keys() {
+        // v4.5-all is the free-tier model missing from the enum until 0.6.0.
+        assert_eq!(ModelVersion::V45All.to_api_key(), "chirp-auk-turbo");
+        assert_eq!(ModelVersion::V55.to_api_key(), "chirp-fenix");
+
+        // Every selectable --model value must have an API key and a display
+        // name matching its clap value name (agent-info relies on this).
+        for m in ModelVersion::value_variants() {
+            assert!(m.to_api_key().starts_with("chirp"));
+            let clap_name = m.to_possible_value().unwrap().get_name().to_string();
+            assert_eq!(m.display_name(), clap_name);
+        }
+    }
+
+    #[test]
+    fn remaster_models_map_to_api_keys() {
+        for m in RemasterModel::value_variants() {
+            assert!(m.to_api_key().starts_with("chirp"));
         }
     }
 }

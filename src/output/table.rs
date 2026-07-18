@@ -137,15 +137,19 @@ pub fn clip_detail(clip: &Clip) {
         table.add_row(vec!["Video URL", url]);
     }
     if let Some(ref prompt) = clip.metadata.prompt {
-        let truncated = if prompt.len() > 200 {
-            format!("{}...", &prompt[..200])
-        } else {
-            prompt.clone()
-        };
-        table.add_row(vec!["Lyrics", &truncated]);
+        table.add_row(vec!["Lyrics", &truncate_chars(prompt, 200)]);
     }
 
     println!("{table}");
+}
+
+/// Truncate to `max` chars on a char boundary — a byte slice like
+/// `&prompt[..200]` panics mid-codepoint on CJK/emoji/accented lyrics.
+fn truncate_chars(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => format!("{}...", &s[..idx]),
+        None => s.to_string(),
+    }
 }
 
 pub fn persona(info: &PersonaInfo) {
@@ -170,4 +174,31 @@ pub fn persona(info: &PersonaInfo) {
     table.add_row(vec!["Clips", &info.persona_clips.len().to_string()]);
 
     println!("{table}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_chars;
+
+    #[test]
+    fn truncate_is_char_boundary_safe() {
+        // 250 CJK chars = 750 bytes; byte index 200 falls mid-codepoint and
+        // the old `&prompt[..200]` panicked here.
+        let cjk: String = std::iter::repeat_n('歌', 250).collect();
+        let out = truncate_chars(&cjk, 200);
+        assert_eq!(out.chars().count(), 203); // 200 chars + "..."
+        assert!(out.ends_with("..."));
+
+        let emoji: String = std::iter::repeat_n('🎵', 210).collect();
+        assert!(truncate_chars(&emoji, 200).ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_leaves_short_strings_alone() {
+        assert_eq!(truncate_chars("short lyrics", 200), "short lyrics");
+        assert_eq!(truncate_chars("", 200), "");
+        // Exactly at the limit — no ellipsis.
+        let exact: String = std::iter::repeat_n('x', 200).collect();
+        assert_eq!(truncate_chars(&exact, 200), exact);
+    }
 }

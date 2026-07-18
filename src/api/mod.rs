@@ -1,4 +1,5 @@
 pub mod billing;
+pub mod captcha;
 pub mod concat;
 pub mod cover;
 pub mod delete;
@@ -142,10 +143,8 @@ impl SunoClient {
             )
         };
         let (session_id, jwt) = if let Some(session_id) = session_id {
-            (
-                session_id.clone(),
-                auth::clerk_refresh_jwt(&self.client, &cookie, &session_id).await?,
-            )
+            let jwt = auth::clerk_refresh_jwt(&self.client, &cookie, &session_id).await?;
+            (session_id, jwt)
         } else {
             auth::clerk_token_exchange(&self.client, &cookie).await?
         };

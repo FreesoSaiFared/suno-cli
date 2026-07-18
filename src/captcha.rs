@@ -54,6 +54,14 @@ pub async fn solve(auth: &AuthState) -> Result<String, CliError> {
     Ok(token)
 }
 
+/// Detect a CDP endpoint answering on the solver port. Called from commands
+/// that never spawn Chrome themselves (`config check`, future `doctor`), so a
+/// hit means a solver Chrome left over from a previous run. Report only —
+/// the instance is reused by later solves and must never be auto-killed.
+pub async fn detect_solver_chrome() -> Option<u16> {
+    cdp_version().await.ok().map(|_| CDP_PORT)
+}
+
 /// Either reuse a Chrome instance already listening on `CDP_PORT` or spawn
 /// a new hidden one with the suno-cli profile dir. Idempotent.
 async fn ensure_chrome_running() -> Result<(), CliError> {
@@ -445,8 +453,7 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
     Ok(token)
 }
 
-/// Pull the user's Suno cookies from their main Chrome via `rookie`.
-/// Returns them in CDP `Network.CookieParam` shape.
+/// Snapshot the page URL + visible text for solver failure diagnostics.
 async fn page_state_excerpt(
     ws: &mut CdpStream,
     next: &mut impl FnMut() -> u64,
@@ -480,6 +487,9 @@ async fn page_state_excerpt(
     }
 }
 
+/// Collect the narrow cookie subset the captcha page needs, in CDP
+/// `Network.CookieParam` shape. Live browser cookies (via `rookie`) win;
+/// stored auth state is the fallback.
 fn extract_cookies(auth: &AuthState) -> Result<Vec<CdpCookie>, CliError> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -524,14 +534,6 @@ fn extract_cookies(auth: &AuthState) -> Result<Vec<CdpCookie>, CliError> {
 
     if let Some(cookie_header) = auth.cookie.as_deref().filter(|c| !c.trim().is_empty()) {
         add_minimal_cookies_from_header(cookie_header, &mut out, &mut seen);
-    }
-
-    if !out.is_empty() {
-        return Ok(out);
-    }
-
-    if add_live_browser_cookies(&mut out, &mut seen) && !out.is_empty() {
-        return Ok(out);
     }
 
     Ok(out)
@@ -616,9 +618,13 @@ fn add_minimal_cookie(
 }
 
 fn is_captcha_cookie(name: &str) -> bool {
+    // Bare "__client" MUST match: it's the Clerk session cookie itself.
+    // Without it the live-browser path loads suno.com/create signed out →
+    // sign-in redirect → "hcaptcha never finished loading".
     matches!(
         name,
-        "__session"
+        "__client"
+            | "__session"
             | "clerk_active_context"
             | "ajs_anonymous_id"
             | "suno_device_id"
@@ -654,7 +660,6 @@ fn push_cookie(
 
 /// Drain the spawned Chrome's stderr in the background — keeps it from
 /// blocking on a full pipe and gives us logs for debugging.
-#[allow(dead_code)]
 fn drain_stderr(child: &mut Child) {
     if let Some(stderr) = child.stderr.take() {
         let mut reader = BufReader::new(stderr).lines();

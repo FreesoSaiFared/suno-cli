@@ -80,7 +80,10 @@ Returns full account info, credits, plan, models, features, limits.
 }
 ```
 
-**IMPORTANT**: Some accounts/flows require a fresh hCaptcha `token` field. The Rust CLI uses a piloted Chrome path when needed and also accepts `--token` for externally supplied solutions.
+**IMPORTANT**: Some accounts/flows require a fresh hCaptcha `token` field. The Rust CLI uses a piloted Chrome path when needed and also accepts `--token` for externally supplied solutions. A `token_provider` field (`"hcaptcha"` when a token is attached, `null` otherwise) rides alongside `token` — July-2026 web clients send both. Whether a captcha is needed at all is answered by the preflight below.
+
+### POST /api/c/check
+**Captcha preflight** (verified live 2026-07-18 on both `studio-api-prod.suno.com` and `studio-api.prod.suno.com`). Request: `{"ctype": "generation"}` with Bearer JWT. Response: `{"required": false, "captcha_version": 1}` — `required` is false for accounts above Suno's trust threshold, so the solver can be skipped entirely. When `required` is true, generating one song in the suno.com UI clears the challenge.
 
 **Two modes**:
 1. **Description mode** (`metadata.create_mode = "inspiration"`, `prompt` is the description) — Suno writes lyrics from description
@@ -92,7 +95,7 @@ Returns full account info, credits, plan, models, features, limits.
 Concatenate/extend clips. `{"clip_id": "<id>"}`
 
 ### POST /api/feed/v3
-**Request**: `{"page": 0}`
+**Request**: `{"cursor": "<opaque next_cursor from previous response>", "limit": 20, "filters": {...}}` — omit `cursor` for the first page. Page numbers are NOT accepted.
 **Response**: `{"clips": [...], "next_cursor": "...", "has_more": true}`
 
 Clip structure:
@@ -110,8 +113,10 @@ User's playlists. Returns `{"num_total_results": N, "current_page": N, "playlist
 ### GET /api/trending/
 Trending clips. Returns playlist-like structure.
 
-### POST /api/generate/stems/
-Stem separation (not tested, needs POST).
+### POST /api/edit/stems/{clip_id}
+Stem separation. Endpoint per gcui-art/paean-ai evidence; implemented in
+`src/api/stems.rs`. (An earlier capture guessed `/api/generate/stems/` —
+wrong path.)
 
 ### POST /api/cover/
 Cover generation (not tested, likely needs POST).

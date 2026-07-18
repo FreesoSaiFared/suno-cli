@@ -20,17 +20,7 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
     };
 
     let ext = if video { "mp4" } else { "mp3" };
-    let slug: String = clip
-        .title
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .replace("--", "-")
-        .trim_matches('-')
-        .to_string();
-    let short_id = &clip.id[..8.min(clip.id.len())];
-    let filename = format!("{slug}-{short_id}.{ext}");
+    let filename = clip_filename(&clip.title, &clip.id, ext);
     let path = Path::new(output_dir).join(&filename);
 
     let client = reqwest::Client::new();
@@ -62,6 +52,30 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
     pb.finish_with_message("done");
 
     Ok(path.display().to_string())
+}
+
+/// Build `<title-slug>-<id8>.<ext>`. Runs of non-alphanumeric chars collapse
+/// to a single `-` (a naive `replace("--", "-")` leaves `--` behind for 3+
+/// char runs), and empty/symbol-only titles must not yield a leading dash.
+fn clip_filename(title: &str, id: &str, ext: &str) -> String {
+    let mut slug = String::new();
+    for c in title.to_lowercase().chars() {
+        if c.is_alphanumeric() {
+            slug.push(c);
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    if slug.ends_with('-') {
+        slug.pop();
+    }
+    // Clip IDs are ASCII UUIDs, so a byte slice is safe here.
+    let short_id = &id[..8.min(id.len())];
+    if slug.is_empty() {
+        format!("{short_id}.{ext}")
+    } else {
+        format!("{slug}-{short_id}.{ext}")
+    }
 }
 
 /// Embed lyrics and metadata into an MP3 file using ID3v2 tags.
@@ -111,4 +125,41 @@ pub fn embed_lyrics_in_mp3(
         .map_err(|e| CliError::Download(format!("failed to write ID3 tags: {e}")))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filename_collapses_separator_runs() {
+        assert_eq!(
+            clip_filename("Hello, World!", "0123456789abcdef", "mp3"),
+            "hello-world-01234567.mp3"
+        );
+        // 3+ char symbol run — the old replace("--","-") left "--" behind.
+        assert_eq!(
+            clip_filename("a — b", "0123456789abcdef", "mp3"),
+            "a-b-01234567.mp3"
+        );
+    }
+
+    #[test]
+    fn filename_handles_empty_and_symbol_only_titles() {
+        // No leading dash when the title slugs away to nothing.
+        assert_eq!(clip_filename("", "0123456789abcdef", "mp3"), "01234567.mp3");
+        assert_eq!(
+            clip_filename("!!!", "0123456789abcdef", "mp4"),
+            "01234567.mp4"
+        );
+    }
+
+    #[test]
+    fn filename_keeps_unicode_titles() {
+        assert_eq!(
+            clip_filename("夜の歌 Remix", "0123456789abcdef", "mp3"),
+            "夜の歌-remix-01234567.mp3"
+        );
+        assert_eq!(clip_filename("short", "abc", "mp3"), "short-abc.mp3");
+    }
 }
