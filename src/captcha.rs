@@ -23,6 +23,7 @@
 use std::collections::HashSet;
 use std::process::Stdio;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -39,10 +40,21 @@ use crate::errors::CliError;
 /// Suno's hCaptcha sitekey, captured from the live web app's
 /// `hcaptcha.render(...)` arguments on 2026-04-08.
 const SUNO_HCAPTCHA_SITEKEY: &str = "d65453de-3f1a-4aac-9366-a0f06e52b2ce";
-/// Port for the suno-cli managed Chrome instance. Picked high to avoid
-/// colliding with the user's main Chrome (which is rarely on 9233).
+/// Preferred port for the suno-cli managed Chrome instance. Picked high to
+/// avoid colliding with the user's main Chrome (which is rarely on 9233). If a
+/// non-Chrome service already holds it, we fall back to an OS-assigned port
+/// tracked in `ACTIVE_PORT`.
 const CDP_PORT: u16 = 9233;
 const CDP_HOST: &str = "127.0.0.1";
+
+/// The loopback port our managed Chrome is actually reachable on. Starts at
+/// `CDP_PORT`; switches to a free port only when something we can't identify
+/// as Chrome already occupies the preferred one.
+static ACTIVE_PORT: AtomicU16 = AtomicU16::new(CDP_PORT);
+
+fn active_port() -> u16 {
+    ACTIVE_PORT.load(Ordering::Relaxed)
+}
 
 /// Singleton holder for the Chrome process so the same instance survives
 /// across multiple `generate()` calls within one CLI invocation.
@@ -52,13 +64,64 @@ fn chrome_slot() -> &'static Mutex<Option<Child>> {
     CHROME.get_or_init(|| Mutex::new(None))
 }
 
+/// Serializes solver runs across every captcha-gated command in one process.
+/// generate/describe/cover/remaster all pilot the same Chrome page, and an
+/// hCaptcha token is single-use — two concurrent solves would race the DOM or
+/// hand back a token another arm already spent.
+static SOLVE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn solve_lock() -> &'static Mutex<()> {
+    SOLVE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 /// Solve a fresh hCaptcha challenge and return the token to attach to a
 /// `/api/generate/v2-web/` request body.
 pub async fn solve(auth: &AuthState) -> Result<String, CliError> {
+    // One solve at a time across the whole process (see SOLVE_LOCK).
+    let _serialized = solve_lock().lock().await;
     ensure_chrome_running().await?;
     let target = find_or_create_suno_tab().await?;
+    // A malicious local listener on the debug port can hand back a remote
+    // debugger URL to siphon the injected Clerk cookie. Only attach to
+    // loopback.
+    if !is_loopback_ws(&target.web_socket_debugger_url) {
+        return Err(CliError::Config(format!(
+            "CDP returned a non-loopback debugger URL ({}) — refusing to send Suno cookies off-host",
+            target.web_socket_debugger_url
+        )));
+    }
     let token = render_and_execute(&target.web_socket_debugger_url, auth).await?;
     Ok(token)
+}
+
+/// Reject a CDP target whose debugger URL is not loopback. Parses the
+/// `ws://host:port/...` authority by hand (no url dep) and accepts only
+/// 127.0.0.0/8, `::1`, or `localhost`.
+fn is_loopback_ws(ws_url: &str) -> bool {
+    let Some(rest) = ws_url
+        .strip_prefix("ws://")
+        .or_else(|| ws_url.strip_prefix("wss://"))
+    else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    // Drop any userinfo, then split host from port. IPv6 literals are bracketed.
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(v6) = hostport.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else {
+        hostport
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(hostport)
+    };
+    // Parse as an IP so `127.0.0.1.evil.com` (a resolvable non-loopback name
+    // that merely starts with "127.") can't slip through a prefix check.
+    if host == "localhost" {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Detect a CDP endpoint answering on the solver port. Called from commands
@@ -69,11 +132,21 @@ pub async fn detect_solver_chrome() -> Option<u16> {
     cdp_version().await.ok().map(|_| CDP_PORT)
 }
 
-/// Either reuse a Chrome instance already listening on `CDP_PORT` or spawn
-/// a new hidden one with the suno-cli profile dir. Idempotent.
+/// Either reuse a Chrome instance already listening on the active port or
+/// spawn a new hidden one with the suno-cli profile dir. Idempotent.
 async fn ensure_chrome_running() -> Result<(), CliError> {
-    if cdp_version().await.is_ok() {
-        return Ok(());
+    // Reuse only a listener we can positively identify as Chromium-family: an
+    // unrelated local service that merely answers the debug port must never
+    // receive our Suno cookies. A stranger on the preferred port pushes us to
+    // an OS-assigned port for our own instance (its profile is free, so the
+    // spawn won't collide).
+    match cdp_version().await {
+        Ok(ver) if cdp_looks_like_chrome(&ver) => return Ok(()),
+        Ok(_) => {
+            let port = free_loopback_port()?;
+            ACTIVE_PORT.store(port, Ordering::Relaxed);
+        }
+        Err(_) => {}
     }
 
     // Need to spawn it.
@@ -89,13 +162,14 @@ async fn ensure_chrome_running() -> Result<(), CliError> {
     // Either way keep a desktop-sized viewport: a 1x1 window makes Suno serve
     // its mobile interstitial, which never loads hCaptcha.
     let headless = std::env::var("SUNO_CAPTCHA_HEADLESS").is_ok_and(|v| v == "1");
+    let port = active_port();
     eprintln!(
         "Launching {} Chrome for captcha solver (one-time per session)...",
         if headless { "headless" } else { "offscreen" }
     );
 
     let mut cmd = Command::new(&chrome_path);
-    cmd.arg(format!("--remote-debugging-port={CDP_PORT}"))
+    cmd.arg(format!("--remote-debugging-port={port}"))
         .arg(format!("--user-data-dir={}", profile_dir.display()))
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
@@ -190,8 +264,34 @@ struct Target {
     web_socket_debugger_url: String,
 }
 
+/// A CDP `/json/version` payload that names a Chromium-family browser. Guards
+/// against handing Suno cookies to an unrelated local service that happens to
+/// answer the debug port.
+fn cdp_looks_like_chrome(version: &serde_json::Value) -> bool {
+    version
+        .get("Browser")
+        .and_then(|b| b.as_str())
+        .map(|b| {
+            let b = b.to_ascii_lowercase();
+            b.contains("chrome") || b.contains("chromium")
+        })
+        .unwrap_or(false)
+}
+
+/// Reserve an OS-assigned loopback port, then release it for Chrome to bind.
+/// The brief release→bind window is acceptable for a single-user debug port.
+fn free_loopback_port() -> Result<u16, CliError> {
+    let listener = std::net::TcpListener::bind((CDP_HOST, 0))
+        .map_err(|e| CliError::Config(format!("could not reserve a debug port: {e}")))?;
+    listener
+        .local_addr()
+        .map(|a| a.port())
+        .map_err(|e| CliError::Config(format!("debug port address: {e}")))
+}
+
 async fn cdp_version() -> Result<serde_json::Value, CliError> {
-    let url = format!("http://{CDP_HOST}:{CDP_PORT}/json/version");
+    let port = active_port();
+    let url = format!("http://{CDP_HOST}:{port}/json/version");
     let resp = reqwest::Client::new()
         .get(&url)
         .timeout(Duration::from_secs(2))
@@ -206,7 +306,8 @@ async fn cdp_version() -> Result<serde_json::Value, CliError> {
 }
 
 async fn cdp_list() -> Result<Vec<Target>, CliError> {
-    let url = format!("http://{CDP_HOST}:{CDP_PORT}/json/list");
+    let port = active_port();
+    let url = format!("http://{CDP_HOST}:{port}/json/list");
     let resp = reqwest::Client::new()
         .get(&url)
         .timeout(Duration::from_secs(5))
@@ -235,7 +336,8 @@ async fn find_or_create_suno_tab() -> Result<Target, CliError> {
 
     // No page target — open a blank one. CDP exposes a /json/new?url= helper.
     let url = format!(
-        "http://{CDP_HOST}:{CDP_PORT}/json/new?{}",
+        "http://{CDP_HOST}:{}/json/new?{}",
+        active_port(),
         urlencode("about:blank")
     );
     let resp = reqwest::Client::new()
@@ -350,17 +452,11 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
     )
     .await?;
 
-    // The managed profile is persistent across CLI invocations. Clear any
-    // previously injected full browser cookie set first; stale analytics and
-    // Clerk duplicates can make suno.com/create fail with HTTP 431 before
-    // hCaptcha even loads.
-    cdp_call(
-        &mut ws,
-        next(),
-        "Network.clearBrowserCookies",
-        serde_json::json!({}),
-    )
-    .await?;
+    // Clear only Suno-origin cookies, never the whole profile: this Chrome may
+    // be the user's own debug instance. Stale analytics and Clerk duplicates
+    // can make suno.com/create fail with HTTP 431 before hCaptcha loads, so we
+    // still wipe the Suno set — just scoped to those origins.
+    clear_suno_cookies(&mut ws, &mut next).await?;
 
     // Inject only the narrow Suno/Clerk cookie subset required to let the web
     // app initialize. Replaying the whole browser Cookie header is brittle and
@@ -471,6 +567,46 @@ async fn render_and_execute(ws_url: &str, auth: &AuthState) -> Result<String, Cl
     Ok(token)
 }
 
+/// Delete every cookie scoped to a Suno origin, leaving other sites' cookies
+/// untouched. Enumerate via `Network.getCookies` for the Suno URLs, then
+/// `Network.deleteCookies` by (name, domain, path).
+async fn clear_suno_cookies(
+    ws: &mut CdpStream,
+    next: &mut impl FnMut() -> u64,
+) -> Result<(), CliError> {
+    let existing = cdp_call(
+        ws,
+        next(),
+        "Network.getCookies",
+        serde_json::json!({
+            "urls": [
+                "https://suno.com/",
+                "https://auth.suno.com/",
+                "https://studio-api-prod.suno.com/",
+            ]
+        }),
+    )
+    .await?;
+    let Some(cookies) = existing.get("cookies").and_then(|c| c.as_array()) else {
+        return Ok(());
+    };
+    for ck in cookies {
+        let name = ck.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let mut params = serde_json::json!({ "name": name });
+        if let Some(domain) = ck.get("domain").and_then(|v| v.as_str()) {
+            params["domain"] = domain.into();
+        }
+        if let Some(path) = ck.get("path").and_then(|v| v.as_str()) {
+            params["path"] = path.into();
+        }
+        cdp_call(ws, next(), "Network.deleteCookies", params).await?;
+    }
+    Ok(())
+}
+
 /// Snapshot the page URL + visible text for solver failure diagnostics.
 async fn page_state_excerpt(
     ws: &mut CdpStream,
@@ -512,49 +648,54 @@ fn extract_cookies(auth: &AuthState) -> Result<Vec<CdpCookie>, CliError> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    if add_live_browser_cookies(&mut out, &mut seen) && !out.is_empty() {
-        return Ok(out);
-    }
+    // Live browser cookies win (they are freshest), but we NEVER stop there: a
+    // browser signed out of Suno still carries useless analytics cookies. Always
+    // merge stored auth afterward so a missing Clerk session cookie is
+    // backfilled from auth.json — push_cookie dedups by (name, domain), so live
+    // cookies keep priority over the stored fallback.
+    add_live_browser_cookies(&mut out, &mut seen);
+    merge_stored_auth(auth, &mut out, &mut seen);
+    Ok(out)
+}
 
+/// Backfill from stored auth.json: the Clerk `__client` session cookie, the
+/// analytics device id, and any captcha-relevant cookies in the saved header.
+/// Runs after the live-browser pass so it only fills genuine gaps.
+fn merge_stored_auth(
+    auth: &AuthState,
+    out: &mut Vec<CdpCookie>,
+    seen: &mut HashSet<(String, String)>,
+) {
     if let Some(clerk) = auth
         .clerk_client_cookie
         .as_deref()
         .filter(|c| !c.trim().is_empty())
     {
-        push_cookie(
-            &mut out,
-            &mut seen,
-            "__client",
-            clerk.trim(),
-            "auth.suno.com",
-            true,
-        );
-        push_cookie(
-            &mut out,
-            &mut seen,
-            "__client",
-            clerk.trim(),
-            ".suno.com",
-            true,
-        );
+        push_cookie(out, seen, "__client", clerk.trim(), "auth.suno.com", true);
+        push_cookie(out, seen, "__client", clerk.trim(), ".suno.com", true);
     }
-
     if let Some(device_id) = auth.device_id.as_deref().filter(|d| !d.trim().is_empty()) {
         push_cookie(
-            &mut out,
-            &mut seen,
+            out,
+            seen,
             "ajs_anonymous_id",
             device_id.trim(),
             ".suno.com",
             false,
         );
     }
-
     if let Some(cookie_header) = auth.cookie.as_deref().filter(|c| !c.trim().is_empty()) {
-        add_minimal_cookies_from_header(cookie_header, &mut out, &mut seen);
+        add_minimal_cookies_from_header(cookie_header, out, seen);
     }
+}
 
-    Ok(out)
+/// A Clerk session cookie — the one cookie the solver truly needs. Without it
+/// suno.com/create loads signed out and hCaptcha never renders.
+fn is_session_cookie(name: &str) -> bool {
+    name == "__client"
+        || name == "__session"
+        || name.starts_with("__client_")
+        || name.starts_with("__session_")
 }
 
 fn add_live_browser_cookies(
@@ -566,30 +707,43 @@ fn add_live_browser_cookies(
         "auth.suno.com".into(),
         ".suno.com".into(),
     ];
-    let Some((browser_name, raw_cookies)) = [
+    // Search EVERY installed browser and prefer one that actually holds a Clerk
+    // session cookie. The first-match-wins scan let a browser carrying only
+    // `ajs_anonymous_id` shadow another that was genuinely signed in.
+    let mut chosen: Option<(&'static str, Vec<rookie::enums::Cookie>)> = None;
+    let mut chosen_has_session = false;
+    for (browser_name, result) in [
         ("Chrome", rookie::chrome(Some(domains.clone()))),
         ("Arc", rookie::arc(Some(domains.clone()))),
         ("Brave", rookie::brave(Some(domains.clone()))),
         ("Firefox", rookie::firefox(Some(domains.clone()))),
-        ("Edge", rookie::edge(Some(domains))),
-    ]
-    .into_iter()
-    .find_map(|(browser_name, result)| match result {
-        Ok(cookies) if cookies.iter().any(|c| c.domain.contains("suno.com")) => {
-            Some((browser_name, cookies))
-        }
-        _ => None,
-    }) else {
-        return false;
-    };
-
-    for c in raw_cookies {
-        if !c.domain.contains("suno.com") {
+        ("Edge", rookie::edge(Some(domains.clone()))),
+    ] {
+        let Ok(cookies) = result else { continue };
+        let suno: Vec<_> = cookies
+            .into_iter()
+            .filter(|c| c.domain.contains("suno.com"))
+            .collect();
+        if suno.is_empty() {
             continue;
         }
-        add_minimal_cookie(&c.name, &c.value, &c.domain, c.http_only, out, seen);
+        let has_session = suno.iter().any(|c| is_session_cookie(&c.name));
+        if chosen.is_none() || (has_session && !chosen_has_session) {
+            chosen = Some((browser_name, suno));
+            chosen_has_session = has_session;
+        }
+        if chosen_has_session {
+            // A signed-in browser is as good as this gets — stop scanning.
+            break;
+        }
     }
 
+    let Some((browser_name, cookies)) = chosen else {
+        return false;
+    };
+    for c in &cookies {
+        add_minimal_cookie(&c.name, &c.value, &c.domain, c.http_only, out, seen);
+    }
     if !out.is_empty() {
         eprintln!("Using fresh Suno browser cookies from {browser_name}");
     }
@@ -686,5 +840,49 @@ fn drain_stderr(child: &mut Child) {
                 // discard
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_ws_accepts_only_local_hosts() {
+        assert!(is_loopback_ws("ws://127.0.0.1:9233/devtools/page/ABCD1234"));
+        assert!(is_loopback_ws("ws://localhost:9233/devtools/browser/x"));
+        assert!(is_loopback_ws("ws://[::1]:9233/devtools/page/x"));
+        assert!(is_loopback_ws("ws://127.9.9.9:1/x"));
+        // A remote debugger URL must be rejected before any cookie is sent.
+        assert!(!is_loopback_ws("ws://10.0.0.5:9233/devtools/page/x"));
+        assert!(!is_loopback_ws("ws://evil.example.com:9233/devtools/x"));
+        assert!(!is_loopback_ws("ws://127.0.0.1.evil.com:9233/x"));
+        assert!(!is_loopback_ws("http://127.0.0.1:9233/x"));
+        assert!(!is_loopback_ws(""));
+    }
+
+    #[test]
+    fn only_chromium_family_listeners_are_reusable() {
+        assert!(cdp_looks_like_chrome(&serde_json::json!({
+            "Browser": "Chrome/146.0.0.0"
+        })));
+        assert!(cdp_looks_like_chrome(&serde_json::json!({
+            "Browser": "HeadlessChromium/120"
+        })));
+        // A stranger answering the debug port must not be trusted with cookies.
+        assert!(!cdp_looks_like_chrome(&serde_json::json!({
+            "Browser": "my-debug-proxy/1.0"
+        })));
+        assert!(!cdp_looks_like_chrome(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn session_cookie_matches_clerk_variants() {
+        assert!(is_session_cookie("__client"));
+        assert!(is_session_cookie("__session"));
+        assert!(is_session_cookie("__client_uat"));
+        assert!(is_session_cookie("__session_ABC"));
+        assert!(!is_session_cookie("ajs_anonymous_id"));
+        assert!(!is_session_cookie("client"));
     }
 }

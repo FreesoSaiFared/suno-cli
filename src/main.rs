@@ -140,11 +140,16 @@ async fn resolve_captcha(
         }
     }
     let auth = AuthState::load()?;
-    let solved = captcha::solve(&auth).await.map_err(|e| {
-        CliError::GenerationFailed(format!(
-            "captcha solve failed: {e} — Suno is enforcing a captcha on this account; \
+    let solved = captcha::solve(&auth).await.map_err(|e| match e {
+        // A Config error (no Chrome installed, non-loopback CDP endpoint) is a
+        // setup problem the user must fix — surface it verbatim as exit 2, not
+        // a retryable GenerationFailed. Only genuine solve failures get the
+        // "clear the challenge in the UI" retry guidance.
+        CliError::Config(_) => e,
+        other => CliError::GenerationFailed(format!(
+            "captcha solve failed: {other} — Suno is enforcing a captcha on this account; \
              generate one song in the suno.com UI to clear the challenge, then retry"
-        ))
+        )),
     })?;
     if forced && !quiet {
         eprintln!(

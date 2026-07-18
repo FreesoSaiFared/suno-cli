@@ -336,7 +336,9 @@ pub struct AlignedWord {
 /// above Suno's trust threshold.
 #[derive(Debug, Deserialize)]
 pub struct CaptchaCheckResponse {
-    #[serde(default)]
+    // No serde default: a payload missing `required` must fail to parse so the
+    // caller's error branch treats captcha as required (fail closed) rather
+    // than silently reading a defaulted `false` and skipping the solver.
     pub required: bool,
     #[serde(default)]
     pub captcha_version: Option<i64>,
@@ -445,6 +447,11 @@ mod tests {
         let r: CaptchaCheckResponse = serde_json::from_str(r#"{"required": true}"#).unwrap();
         assert!(r.required);
         assert_eq!(r.captcha_version, None);
+
+        // A payload without `required` must NOT parse: the solver-fallback path
+        // depends on this failing so a missing field reads as "captcha required"
+        // instead of a defaulted false.
+        assert!(serde_json::from_str::<CaptchaCheckResponse>(r#"{"captcha_version": 1}"#).is_err());
     }
 
     #[test]

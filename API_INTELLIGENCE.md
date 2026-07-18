@@ -80,7 +80,7 @@ Returns full account info, credits, plan, models, features, limits.
 }
 ```
 
-**IMPORTANT**: Some accounts/flows require a fresh hCaptcha `token` field. The Rust CLI uses a piloted Chrome path when needed and also accepts `--token` for externally supplied solutions. A `token_provider` field (`"hcaptcha"` when a token is attached, `null` otherwise) rides alongside `token` — July-2026 web clients send both. Whether a captcha is needed at all is answered by the preflight below.
+**IMPORTANT**: Some accounts/flows require a fresh hCaptcha `token` field. The Rust CLI uses a piloted Chrome path when needed and also accepts `--token` for externally supplied solutions. Do **not** send a `token_provider` field: the v2-web endpoint 422s on the string (verified 2026; the CLI dropped it), so only `token` rides on the request body. Whether a captcha is needed at all is answered by the preflight below.
 
 ### POST /api/c/check
 **Captcha preflight** (verified live 2026-07-18 on both `studio-api-prod.suno.com` and `studio-api.prod.suno.com`). Request: `{"ctype": "generation"}` with Bearer JWT. Response: `{"required": false, "captcha_version": 1}` — `required` is false for accounts above Suno's trust threshold, so the solver can be skipped entirely. When `required` is true, generating one song in the suno.com UI clears the challenge.
