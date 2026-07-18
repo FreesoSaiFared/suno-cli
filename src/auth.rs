@@ -293,12 +293,6 @@ pub fn extract_browser_auth() -> Result<BrowserAuth, CliError> {
     ))
 }
 
-/// Backwards-compatible helper for callers that only need the Clerk cookie.
-#[allow(dead_code)]
-pub fn extract_clerk_cookie() -> Result<String, CliError> {
-    Ok(extract_browser_auth()?.clerk_client_cookie)
-}
-
 /// Exchange the __client cookie for a session ID and JWT via Clerk.
 pub async fn clerk_token_exchange(
     client: &reqwest::Client,

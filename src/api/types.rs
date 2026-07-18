@@ -293,8 +293,6 @@ pub struct ControlSliders {
 pub struct GenerateResponse {
     #[serde(default)]
     pub clips: Vec<Clip>,
-    #[allow(dead_code)]
-    pub status: Option<String>,
 }
 
 // --- Lyrics ---

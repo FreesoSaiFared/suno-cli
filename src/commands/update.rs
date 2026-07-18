@@ -154,10 +154,15 @@ pub fn run(check: bool, force: bool, fmt: OutputFormat, quiet: bool) -> Result<(
             .get_latest_release()
             .map_err(|e| CliError::Update(e.to_string()))?;
         let v = latest.version.trim_start_matches('v').to_string();
-        let status = if v == current {
-            "up_to_date"
-        } else {
+        // Semantic compare, not string equality: a local build ahead of the
+        // latest release (0.6.0 vs 0.5.7) must read up_to_date, never
+        // update_available.
+        let status = if self_update::version::bump_is_greater(current, &v)
+            .map_err(|e| CliError::Update(e.to_string()))?
+        {
             "update_available"
+        } else {
+            "up_to_date"
         };
         (v, status)
     } else {
@@ -169,10 +174,12 @@ pub fn run(check: bool, force: bool, fmt: OutputFormat, quiet: bool) -> Result<(
             .update()
             .map_err(|e| CliError::Update(e.to_string()))?;
         let v = release.version().trim_start_matches('v').to_string();
-        let status = if v == current {
-            "up_to_date"
-        } else {
+        let status = if self_update::version::bump_is_greater(current, &v)
+            .map_err(|e| CliError::Update(e.to_string()))?
+        {
             "updated"
+        } else {
+            "up_to_date"
         };
         (v, status)
     };
