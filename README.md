@@ -53,16 +53,23 @@ cargo install suno
 
 Download from [GitHub Releases](https://github.com/paperfoot/suno-cli/releases) — binaries for macOS (Apple Silicon + Intel), Linux (x86_64 + ARM), and Windows.
 
-### Self-update
+### Updating
 
-Already have `suno` installed? Pull the latest binary from GitHub Releases without touching your package manager:
+`suno update` is distribution-aware: it detects how the binary was installed and never overwrites a package-manager-owned install.
 
 ```bash
-suno update --check    # see what's available
-suno update            # install the latest release
+suno update --check    # see what's available (JSON when piped)
+suno update            # standalone installs: self-replace from GitHub Releases
+                       # brew/cargo installs: prints the right upgrade command instead
 ```
 
-> Tip: when Suno changes their API mid-cycle, run `suno update` first — it's faster than `cargo install suno` or waiting for the Homebrew bottle to refresh.
+| Install source | What `suno update` does |
+|---|---|
+| Homebrew | Never self-replaces — tells you to run `brew upgrade paperfoot/tap/suno` |
+| Cargo | Never self-replaces — tells you to run `cargo install --locked --force suno` |
+| Standalone binary | Downloads and swaps in the latest GitHub release |
+
+After updating, run `suno skill install` to refresh the agent skill.
 
 ## Quick Start
 
@@ -70,10 +77,13 @@ suno update            # install the latest release
 # 1. Authenticate (auto-extracts from Chrome/Arc/Brave/Firefox/Edge)
 suno auth --login
 
-# 2. Check your credits
+# 2. Verify the setup end to end (auth, JWT freshness, Chrome, API reach, credits)
+suno doctor
+
+# 3. Check your credits
 suno credits
 
-# 3. Generate a song with full control
+# 4. Generate a song with full control
 suno generate \
   --title "Weekend Code" \
   --tags "indie rock, guitar, upbeat" \
@@ -84,16 +94,18 @@ suno generate \
   --style-influence 65 \
   --wait --download ./songs/
 
-# 4. Generate with your voice persona
+# 5. Generate with your voice persona
 suno generate \
   --title "My Song" \
   --tags "pop, warm" \
   --persona e483d2f0-50ca-4a09-8a74-b9e074646377 \
   --lyrics "[Verse]\nHello from the CLI"
 
-# 5. Let Suno write the lyrics for you
+# 6. Let Suno write the lyrics for you
 suno describe --prompt "a chill lo-fi track about rainy mornings" --wait
 ```
+
+Generation costs ~70 credits per call on v5.5 (35 per clip, 2 clips per call — measured live). Older models are cheaper; `suno lyrics` is free. Check `suno models` for what your plan can use.
 
 ## Commands
 
@@ -113,7 +125,7 @@ suno stems           Extract vocals and instruments
 ### Browse & Inspect
 
 ```
-suno list            List your songs
+suno list            List your songs (--cursor for the next page)
 suno search <query>  Search songs by title or tags
 suno info <id>       Detailed view of a single clip
 suno persona <id>    View a voice persona
@@ -132,14 +144,15 @@ suno publish <ids>   Toggle public/private visibility
 suno timed-lyrics    Get word-level timestamped lyrics (--lrc for LRC format)
 ```
 
-### Config & Auth
+### Config, Auth & Tooling
 
 ```
-suno auth            Set up authentication
-suno config          show | set | check
+suno auth            Set up authentication (--login | --refresh | --cookie | --jwt | --logout)
+suno config          show | set | path | check
+suno doctor          Health checks: auth, JWT, Chrome, API reach, credits, captcha state
 suno agent-info      Machine-readable capabilities JSON
-suno install-skill   Install agent skill into Claude Code / Cursor
-suno update          Self-update from GitHub Releases (--check to peek first)
+suno skill           install | status — agent skill for Claude Code / Codex / Gemini
+suno update          Distribution-aware update (--check to peek first)
 ```
 
 ## Features
@@ -169,15 +182,24 @@ Auth methods (in order of convenience):
 | `--exclude` | Styles to avoid | `"metal, heavy, dark"` (1000 chars) |
 | `--lyrics` / `--lyrics-file` | Custom lyrics with `[Verse]` tags | up to 5000 chars |
 | `--prompt` (describe) | Free text description | up to 500 chars |
-| `--model` | Model version | v5.5, v5, v4.5+, v4.5, v4, v3.5, v3, v2 |
+| `--model` | Model version | v5.5, v5, v4.5+, v4.5-all, v4.5, v4, v3.5, v3, v2 |
 | `--vocal` | Vocal gender | male, female |
 | `--persona` | Voice persona ID | UUID from Suno voice creation |
 | `--weirdness` | How experimental | 0-100 |
 | `--style-influence` | How strictly to follow tags | 0-100 |
-| `--variation` | Output variation | high, normal, subtle |
+| `--audio-influence` | How strongly source audio shapes the output (generate/cover) | 0-100 |
 | `--instrumental` | No vocals | flag |
 | `--wait` | Block until done | flag |
 | `--download <dir>` | Auto-download after generation | directory path |
+| `--token` | Pre-solved hCaptcha token (headless servers) | token string |
+| `--no-captcha` | Never run the captcha auto-solver | flag |
+| `--force` | Bypass the duplicate-run guard | flag |
+
+`--wait` exits non-zero when Suno reports the generation failed (moderation rejections exit 3 — retrying the same prompt fails identically).
+
+### Captcha Preflight
+
+Before every generate/describe/extend/cover/remaster, the CLI asks Suno whether this account is captcha-gated (`POST /api/c/check`). Most accounts are above the trust threshold, so the Chrome-piloting hCaptcha solver is skipped entirely (`Captcha not required — skipping solver` on stderr). When a captcha IS required, the solver runs automatically; `--token` supplies a pre-solved response instead, and `--no-captcha` disables solving outright. If a challenge keeps failing, generate one song in the suno.com UI to clear it, then retry.
 
 ### Voice Personas
 
@@ -247,13 +269,34 @@ Files use slug format: `title-slug-clipid8.mp3` — no overwrites when Suno gene
 
 | Version | Codename | Default | Notes |
 |---|---|---|---|
-| **v5.5** | chirp-fenix | Yes | Latest, best quality |
+| **v5.5** | chirp-fenix | Yes | Latest, best quality — ≈70 credits per call (35/clip) |
 | v5 | chirp-crow | | Previous generation |
 | v4.5+ | chirp-bluejay | | Extended capabilities |
+| v4.5-all | chirp-auk-turbo | | "Best free model" per Suno — cheapest generation |
 | v4.5 | chirp-auk | | Stable |
 | v4 | chirp-v4 | | Legacy |
+| v3.5 / v3 / v2 | chirp-v3-5 / chirp-v3-0 / chirp-v2-xxl-alpha | | Early models |
 
 Remaster models: v5.5 = chirp-flounder, v5 = chirp-carp, v4.5+ = chirp-bass.
+
+`suno models` shows what your plan can actually use, live from the API.
+
+### Configuration
+
+Config lives in a TOML file (`suno config path` shows where) and every key is overridable via `SUNO_*` env vars. Precedence: **flag > env > config file > default**.
+
+| Key | Env var | Default | What it does |
+|---|---|---|---|
+| `default_model` | `SUNO_DEFAULT_MODEL` | `v5.5` | Default `--model` for generate/describe/extend/cover |
+| `poll_interval_secs` | `SUNO_POLL_INTERVAL_SECS` | `5` | Initial `--wait` poll backoff (doubles up to 15s) |
+| `poll_timeout_secs` | `SUNO_POLL_TIMEOUT_SECS` | `600` | Total `--wait` timeout |
+| `output_dir` | `SUNO_OUTPUT_DIR` | `.` | Default directory for `download` |
+
+```bash
+suno config show                        # effective merged config
+suno config set default_model v4.5-all  # persist a value
+suno config check                       # validate the file
+```
 
 ### Agent-Friendly
 
@@ -262,11 +305,12 @@ Every command supports `--json` for structured output. When stdout is piped, JSO
 | Code | Meaning | Agent action |
 |---|---|---|
 | 0 | Success | Continue |
-| 1 | Runtime error (network, API) | Retry with backoff |
-| 2 | Config error | Fix config, don't retry |
-| 3 | Auth error | Run `suno auth --login` |
+| 1 | Transient error (network, API, download) | Retry with backoff |
+| 2 | Configuration or auth error | Run `suno doctor`; for auth `suno auth --login` |
+| 3 | Bad input (arguments, unknown ID, moderation rejection, duplicate run) | Fix before retrying |
 | 4 | Rate limited | Wait 30-60s, retry |
-| 5 | Not found | Verify resource ID |
+
+> **Breaking change in v0.6.0:** exit codes were remapped to the [agent-cli-framework](https://github.com/paperfoot/agent-cli-framework) contract. Auth errors moved 3 → 2, not-found moved 5 → 3, and code 5 no longer exists. `list --json` data changed from a bare clip array to `{clips, next_cursor, has_more}`, `list --page` was replaced by `--cursor`, and `generate --variation` was removed. Agents pinned to the 0.5.x contract must update their handling.
 
 Error responses include actionable suggestions:
 
@@ -276,39 +320,39 @@ Error responses include actionable suggestions:
   "status": "error",
   "error": {
     "code": "auth_expired",
-    "message": "JWT expired — run `suno auth` to refresh",
-    "suggestion": "Run `suno auth --login` to refresh your session"
+    "message": "JWT expired or rejected by Suno",
+    "suggestion": "Run `suno auth --refresh`; if that fails, run `suno auth --login`"
   }
 }
 ```
 
 ```bash
 # Pipe-friendly: auto-JSON when piped
-suno list | jq '.data[0].title'
+suno list | jq '.data.clips[0].title'
+
+# Paginate with the opaque cursor
+suno list --cursor "$(suno list | jq -r '.data.next_cursor')"
 
 # Agent capabilities discovery
 suno agent-info
+
+# Deterministic exit-code probe (hidden, for conformance tests)
+suno contract 3; echo $?   # 3
 ```
+
+The vendored framework conformance probe runs in CI: `./conformance/conformance.sh target/release/suno`.
 
 ### Install as a Coding Agent Skill
 
-Teach Claude Code (or Cursor) how to use `suno` with one command:
+Teach Claude Code, Codex CLI, and Gemini CLI how to use `suno` with one command:
 
 ```bash
-# Claude Code (~/.claude/skills/suno/SKILL.md)
-suno install-skill
-
-# Cursor (./.cursor/rules/suno.mdc in the current workspace)
-suno install-skill --target cursor
-
-# Print the skill content without writing
-suno install-skill --print
-
-# Custom path
-suno install-skill --path ~/my-agents/suno.md --force
+suno skill install   # writes SKILL.md to every detected platform:
+                     #   ~/.claude/skills/suno/  ~/.codex/skills/suno/  ~/.gemini/skills/suno/
+suno skill status    # which platforms have it, and whether it's current
 ```
 
-After installation, your coding agent automatically picks up the skill on the next session and knows how to invoke `suno` for music generation, downloads, stems, covers, and remasters.
+Install is idempotent (`already_current` when nothing changed). The 0.5.x spelling `suno install-skill` still works as a hidden alias. After a CLI update, re-run `suno skill install` so agents see the new surface.
 
 ### API Endpoint Versions (Confirmed)
 
@@ -332,7 +376,6 @@ Generation tasks use `/api/generate/v2-web/` with the current web request shape.
 We especially welcome:
 - Audio upload implementation (S3 presigned flow documented in `API_INTELLIGENCE.md`)
 - Voice persona creation workflow (endpoints captured, request bodies needed)
-- Integration tests with `assert_cmd`
 - OS keychain/Secret Service/CredMan storage for auth secrets
 
 ## License

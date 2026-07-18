@@ -15,6 +15,9 @@ jobs:
         with:
           components: clippy, rustfmt
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo build --release
+      # Vendored framework contract probe (conformance/ tracks
+      # paperfoot/agent-cli-framework) — the release binary must conform.
+      - run: ./conformance/conformance.sh target/release/suno
