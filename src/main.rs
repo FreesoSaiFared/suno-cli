@@ -903,7 +903,15 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             }
         }
 
-        Commands::Update(args) => commands::update::run(args.check, args.force, fmt, cli.quiet)?,
+        Commands::Update(args) => {
+            // self_update drives blocking reqwest, which refuses to run on the
+            // async runtime thread (panics under debug_assertions) — hop to a
+            // blocking thread.
+            let (check, force, quiet) = (args.check, args.force, cli.quiet);
+            tokio::task::spawn_blocking(move || commands::update::run(check, force, fmt, quiet))
+                .await
+                .map_err(|e| CliError::Update(format!("update task failed: {e}")))??
+        }
 
         Commands::Contract { code } => commands::contract::run(fmt, code)?,
 
