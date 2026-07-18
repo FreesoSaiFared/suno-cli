@@ -164,14 +164,23 @@ fn check_auth(checks: &mut Vec<DoctorCheck>) -> Option<AuthState> {
     Some(state)
 }
 
-fn check_chrome(checks: &mut Vec<DoctorCheck>) {
+/// Returns whether a Chrome/Chromium binary is available, so the captcha
+/// preflight check can escalate to a failure when the solver is actually
+/// needed but can't run.
+fn check_chrome(checks: &mut Vec<DoctorCheck>) -> bool {
     match crate::captcha::locate_chrome() {
-        Ok(path) => checks.push(DoctorCheck::pass("chrome", path)),
-        Err(e) => checks.push(DoctorCheck::warn(
-            "chrome",
-            e.to_string(),
-            Some("Only needed when Suno captcha-gates this account — install Chrome or set SUNO_CHROME_PATH".into()),
-        )),
+        Ok(path) => {
+            checks.push(DoctorCheck::pass("chrome", path));
+            true
+        }
+        Err(e) => {
+            checks.push(DoctorCheck::warn(
+                "chrome",
+                e.to_string(),
+                Some("Only needed when Suno captcha-gates this account — install Chrome or set SUNO_CHROME_PATH".into()),
+            ));
+            false
+        }
     }
 }
 
@@ -191,9 +200,19 @@ async fn check_solver_chrome(checks: &mut Vec<DoctorCheck>) {
 
 /// API reachability (warn-only), credits, and the captcha preflight —
 /// everything that needs a working client.
-async fn check_api(checks: &mut Vec<DoctorCheck>, state: AuthState) {
+async fn check_api(checks: &mut Vec<DoctorCheck>, state: AuthState, chrome_available: bool) {
     let client = match SunoClient::new_with_refresh(state).await {
         Ok(c) => c,
+        // An auth rejection is a setup failure, not a flaky-network warning:
+        // the fix is `suno auth`, so it must count toward exit 2.
+        Err(e @ (CliError::AuthExpired | CliError::AuthMissing)) => {
+            checks.push(DoctorCheck::fail(
+                "studio_api",
+                format!("authentication rejected: {e}"),
+                "Run `suno auth --refresh`, then `suno auth --login` if that fails",
+            ));
+            return;
+        }
         Err(e) => {
             checks.push(DoctorCheck::warn(
                 "studio_api",
@@ -234,6 +253,15 @@ async fn check_api(checks: &mut Vec<DoctorCheck>, state: AuthState) {
     }
 
     match client.captcha_check("generation").await {
+        Ok(resp) if resp.required && !chrome_available => {
+            // Captcha is enforced on this account but the solver has no browser
+            // to drive — generation will hard-fail. That's a setup failure.
+            checks.push(DoctorCheck::fail(
+                "captcha_preflight",
+                "required: true, but no Chrome/Chromium is available to solve it",
+                "Install Google Chrome or set SUNO_CHROME_PATH",
+            ));
+        }
         Ok(resp) => {
             let detail = if resp.required {
                 "required: true — generation will pilot Chrome to solve hCaptcha".to_string()
@@ -255,10 +283,10 @@ pub async fn run(fmt: OutputFormat, quiet: bool) -> Result<(), CliError> {
 
     check_config(&mut checks);
     let auth = check_auth(&mut checks);
-    check_chrome(&mut checks);
+    let chrome_available = check_chrome(&mut checks);
     check_solver_chrome(&mut checks).await;
     if let Some(state) = auth {
-        check_api(&mut checks, state).await;
+        check_api(&mut checks, state, chrome_available).await;
     }
 
     let count = |s: CheckStatus| checks.iter().filter(|c| c.status == s).count();
@@ -268,10 +296,20 @@ pub async fn run(fmt: OutputFormat, quiet: bool) -> Result<(), CliError> {
         fail: count(CheckStatus::Fail),
     };
     let has_failures = summary.fail > 0;
+    // The envelope status must reflect the checks: a failing run is not a
+    // "success" envelope that happens to exit 2. Some checks still passing →
+    // partial_success; nothing passed → all_failed.
+    let envelope_status = if !has_failures {
+        "success"
+    } else if summary.pass > 0 {
+        "partial_success"
+    } else {
+        "all_failed"
+    };
     let report = DoctorReport { checks, summary };
 
     match fmt {
-        OutputFormat::Json => crate::output::json::success(&report),
+        OutputFormat::Json => crate::output::json::with_status(envelope_status, &report),
         OutputFormat::Table => {
             for check in &report.checks {
                 let icon = match check.status {

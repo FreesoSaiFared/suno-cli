@@ -122,8 +122,10 @@ fn doctor_without_auth_exits_2() {
     assert_eq!(out.status.code(), Some(2));
 
     // The report itself still lands on stdout so agents can read the checks.
+    // A failing run is a partial_success envelope (config/solver checks still
+    // pass), not a "success" that happens to exit 2.
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(report["status"], "success");
+    assert_eq!(report["status"], "partial_success");
     assert!(report["data"]["checks"].is_array());
     let auth_check = report["data"]["checks"]
         .as_array()

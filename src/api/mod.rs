@@ -198,13 +198,7 @@ impl SunoClient {
             return Err(CliError::RateLimited);
         }
         if status == 404 {
-            // Suno serves an HTML 404 for unknown IDs (trash/set/publish with
-            // a bogus UUID). Permanent failure — NotFound (exit 3) so agents
-            // fix the ID instead of retrying an api_error.
-            return Err(CliError::NotFound(format!(
-                "{} (HTTP 404)",
-                resp.url().path()
-            )));
+            return Err(classify_404(resp.url().path()));
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -247,4 +241,79 @@ fn looks_like_auth_expired(body: &str) -> bool {
         || lower.contains("invalid token")
         || lower.contains("not authenticated")
         || lower.contains("unauthenticated")
+}
+
+/// A 404's meaning depends on the endpoint. On a fixed route (billing/info,
+/// the captcha check, generate/concat, the feed listing) a 404 means the
+/// endpoint moved or the schema drifted — retrying the same request won't
+/// help, so it maps to `api_error` with an "update the CLI" suggestion, not
+/// "fix the ID". On every other endpoint the 404 is ID-addressed (feed-by-id,
+/// `/api/gen/{id}/…`, delete/set/publish) and means the caller's ID doesn't
+/// exist — a permanent NotFound (exit 3).
+fn classify_404(path: &str) -> CliError {
+    // Bare routes carry no caller-supplied resource id (feed-by-id polls
+    // `/api/feed/` with an `ids=` query, which is NOT in this set).
+    const ROUTE_LEVEL: &[&str] = &[
+        "/api/billing/info/",
+        "/api/c/check",
+        "/api/generate/v2-web/",
+        "/api/generate/concat/v2/",
+        "/api/generate/lyrics/",
+        "/api/feed/v3",
+    ];
+    if ROUTE_LEVEL.contains(&path) {
+        return CliError::Api {
+            code: "api_error",
+            message: format!(
+                "HTTP 404 on {path} — this Suno endpoint moved or its schema changed; \
+                 run `suno update` to pull the latest fix"
+            ),
+        };
+    }
+    CliError::NotFound(format!("{path} (HTTP 404)"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_level_404_is_transient_not_notfound() {
+        // A moved/renamed route → api_error (retryable / update the CLI), never
+        // "fix the ID". The live /api/feed/v3 404 motivated this split.
+        for path in [
+            "/api/billing/info/",
+            "/api/c/check",
+            "/api/generate/v2-web/",
+            "/api/feed/v3",
+        ] {
+            assert!(
+                matches!(
+                    classify_404(path),
+                    CliError::Api {
+                        code: "api_error",
+                        ..
+                    }
+                ),
+                "{path} should be api_error"
+            );
+        }
+    }
+
+    #[test]
+    fn id_addressed_404_is_notfound() {
+        // Feed-by-id (info/download poll) hits `/api/feed/` with an ids query;
+        // the path alone is not a known route, so it's a bad-ID NotFound.
+        for path in [
+            "/api/feed/",
+            "/api/gen/abc-123/set_visibility/",
+            "/api/feed/trash",
+            "/api/edit/stems/abc-123",
+        ] {
+            assert!(
+                matches!(classify_404(path), CliError::NotFound(_)),
+                "{path} should be NotFound"
+            );
+        }
+    }
 }
