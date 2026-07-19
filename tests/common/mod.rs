@@ -1,11 +1,11 @@
 //! Shared test helpers: run the suno binary against a fully isolated home.
 //!
-//! Overriding HOME alone is NOT enough. GitHub's Linux runners export
-//! XDG_CONFIG_HOME, which the `directories` crate prefers over HOME, so
-//! tests that only set HOME silently read and write the runner's real
-//! config directory — polluting every other test. Point HOME and all XDG
-//! dirs at the temp home so the child process is hermetic on every
-//! platform (agent-cli-framework commit a7797eb).
+//! Overriding HOME alone is NOT enough. On Linux the `directories` crate
+//! prefers XDG_CONFIG_HOME over HOME; on Windows it reads the Known Folder
+//! API and ignores HOME/XDG entirely, so env-based isolation silently fails
+//! and parallel tests collide in the runner's real %APPDATA%. The robust
+//! cross-platform lever is SUNO_CONFIG_DIR / SUNO_DATA_DIR, which the binary
+//! honors directly; we still pin HOME/XDG for belt-and-suspenders.
 
 #![allow(dead_code)] // not every test file uses every helper
 
@@ -21,6 +21,8 @@ const AMBIENT_ENV: &[&str] = &[
     "SUNO_OUTPUT_DIR",
     "SUNO_INSTALL_SOURCE",
     "SUNO_CHROME_PATH",
+    "SUNO_CONFIG_DIR",
+    "SUNO_DATA_DIR",
     "SUNO_LIVE_TESTS",
 ];
 
@@ -35,10 +37,14 @@ pub fn suno() -> Command {
     cmd
 }
 
-/// The suno binary with HOME and XDG dirs isolated to `home`.
+/// The suno binary with config and state isolated to `home`. SUNO_CONFIG_DIR
+/// / SUNO_DATA_DIR are the load-bearing overrides (cross-platform); HOME and
+/// XDG are pinned too so nothing leaks on any platform.
 pub fn suno_in(home: &Path) -> Command {
     let mut cmd = suno();
-    cmd.env("HOME", home)
+    cmd.env("SUNO_CONFIG_DIR", home.join("config"))
+        .env("SUNO_DATA_DIR", home.join("data"))
+        .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))
         .env("XDG_CACHE_HOME", home.join(".cache"));

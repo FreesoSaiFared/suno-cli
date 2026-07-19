@@ -12,6 +12,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::CliError;
 
+/// A directory-path env override, ignored when unset or blank.
+fn env_dir(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppConfig {
     /// Default --model for generate/describe/extend/cover (clap name,
@@ -36,14 +43,29 @@ impl Default for AppConfig {
     }
 }
 
-pub fn config_path() -> PathBuf {
+/// Config directory (holds `config.toml` and `auth.json`). `SUNO_CONFIG_DIR`
+/// overrides it — required for hermetic tests on Windows, where the
+/// `directories` crate reads the Known Folder API and ignores HOME/XDG, and
+/// handy for agents that want to redirect state.
+pub fn config_dir() -> PathBuf {
+    if let Some(dir) = env_dir("SUNO_CONFIG_DIR") {
+        return dir;
+    }
     directories::ProjectDirs::from("com", "suno-cli", "suno-cli")
-        .map(|d| d.config_dir().join("config.toml"))
-        .unwrap_or_else(|| PathBuf::from("~/.config/suno-cli/config.toml"))
+        .map(|d| d.config_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("~/.config/suno-cli"))
+}
+
+pub fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
 }
 
 /// State directory (duplicate-guard locks, solver Chrome profile).
+/// `SUNO_DATA_DIR` overrides it (see [`config_dir`]).
 pub fn data_dir() -> PathBuf {
+    if let Some(dir) = env_dir("SUNO_DATA_DIR") {
+        return dir;
+    }
     directories::ProjectDirs::from("com", "suno-cli", "suno-cli")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))

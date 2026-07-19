@@ -151,9 +151,7 @@ async fn ensure_chrome_running() -> Result<(), CliError> {
 
     // Need to spawn it.
     let chrome_path = locate_chrome()?;
-    let profile_dir = directories::ProjectDirs::from("com", "suno-cli", "suno-cli")
-        .map(|d| d.data_dir().join("chrome-profile"))
-        .ok_or_else(|| CliError::Config("could not resolve data dir for chrome profile".into()))?;
+    let profile_dir = crate::config::data_dir().join("chrome-profile");
     std::fs::create_dir_all(&profile_dir)?;
 
     // Default: a headed Chrome shoved far offscreen. --headless=new

@@ -295,6 +295,11 @@ Config lives in a TOML file (`suno config path` shows where) and every key is ov
 | `poll_timeout_secs` | `SUNO_POLL_TIMEOUT_SECS` | `600` | Total `--wait` timeout |
 | `output_dir` | `SUNO_OUTPUT_DIR` | `.` | Default directory for `download` |
 
+`SUNO_CONFIG_DIR` and `SUNO_DATA_DIR` relocate the config/auth directory and
+the state directory (guard locks, captcha Chrome profile) — useful for
+sandboxing or running isolated instances. `suno config path` shows the
+resolved location.
+
 ```bash
 suno config show                        # effective merged config
 suno config set default_model v4.5-all  # persist a value

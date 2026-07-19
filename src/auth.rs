@@ -112,9 +112,7 @@ impl AuthState {
     }
 
     fn path() -> PathBuf {
-        directories::ProjectDirs::from("com", "suno-cli", "suno-cli")
-            .map(|dirs| dirs.config_dir().join("auth.json"))
-            .unwrap_or_else(|| PathBuf::from("~/.config/suno-cli/auth.json"))
+        crate::config::config_dir().join("auth.json")
     }
 }
 

@@ -403,9 +403,10 @@ fn command_map() -> serde_json::Map<String, Value> {
 }
 
 pub fn run() {
-    let auth_path = directories::ProjectDirs::from("com", "suno-cli", "suno-cli")
-        .map(|d| d.config_dir().join("auth.json").display().to_string())
-        .unwrap_or_else(|| "~/.config/suno-cli/auth.json".into());
+    let auth_path = crate::config::config_dir()
+        .join("auth.json")
+        .display()
+        .to_string();
 
     let info = json!({
         "name": "suno",
