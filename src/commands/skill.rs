@@ -17,6 +17,15 @@ struct SkillTarget {
 }
 
 fn home() -> PathBuf {
+    // Prefer the HOME / USERPROFILE env vars over the platform home lookup:
+    // `directories::UserDirs` reads the Known Folder API on Windows and ignores
+    // HOME, so honoring the env var directly keeps tests hermetic there and
+    // still resolves correctly for real users on every platform.
+    for key in ["HOME", "USERPROFILE"] {
+        if let Some(dir) = std::env::var_os(key).filter(|v| !v.is_empty()) {
+            return PathBuf::from(dir);
+        }
+    }
     directories::UserDirs::new()
         .map(|d| d.home_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
