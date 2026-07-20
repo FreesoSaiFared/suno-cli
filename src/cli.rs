@@ -123,6 +123,9 @@ pub enum Commands {
     /// Machine-readable capabilities (for AI agents)
     AgentInfo,
 
+    /// Compose a Suno-ready structured song (the native song generator)
+    Write(WriteArgs),
+
     /// Read built-in songwriting guides (list all, or print one)
     #[command(visible_alias = "guides")]
     Guide(GuideArgs),
@@ -160,6 +163,108 @@ pub struct UpdateArgs {
 pub struct GuideArgs {
     /// Guide name or alias (e.g. songwriting, priming). Omit to list all guides.
     pub name: Option<String>,
+}
+
+// `suno write` help. Agents read --help to learn the command; keep it concrete.
+const WRITE_HELP: &str = "\
+Tips:
+  • Genres are fuzzy/case-insensitive; an unknown genre becomes a raw style tag (never fails)
+  • Output is a scaffold: fill the <...> lyric placeholders, then run `suno generate --lyrics-file`
+  • --viral adds earworm/hook meta-tags; --instrumental drops all vocals + lyric slots
+  • --mode priming sets a chill-lounge scaffold + Prime-Stack Map (see `suno guide priming`)
+  • Plain text to stdout (JSON envelope with --json); --out writes the song to a file
+
+Examples:
+  suno write --theme \"late-night coding\" --genre indie-rock --vocal male
+    Compose an indie-rock scaffold; fill the lyric slots, then generate
+
+  suno write --theme \"summer love\" --genre pop --viral --title \"Golden Hour\"
+    A pop song with earworm hook tags baked into the style prompt
+
+  suno write --genre lo-fi --instrumental --out beat.txt
+    Instrumental lo-fi scaffold written to a file
+
+  suno write --mode priming --domain investment --subtlety medium --target \"batch: seed investors\"
+    Priming research scaffold (chill lounge, 72 BPM) with a Prime-Stack Map template";
+
+#[derive(clap::Args)]
+#[command(after_long_help = WRITE_HELP)]
+pub struct WriteArgs {
+    /// What the song is about (fills the {theme} placeholders)
+    #[arg(long)]
+    pub theme: Option<String>,
+
+    /// Genre or subgenre (fuzzy match; unknown → used verbatim as a style tag)
+    #[arg(long)]
+    pub genre: Option<String>,
+
+    /// Mood override, e.g. "bittersweet and hopeful" (else the genre default)
+    #[arg(long)]
+    pub mood: Option<String>,
+
+    /// Vocal gender direction (male | female)
+    #[arg(long)]
+    pub vocal: Option<VocalGender>,
+
+    /// Tempo in BPM (defaults to the genre's tempo)
+    #[arg(long)]
+    pub bpm: Option<u32>,
+
+    /// Add earworm / hook meta-tags and catchiness tags
+    #[arg(long)]
+    pub viral: bool,
+
+    /// Instrumental — no vocals, no lyric placeholders
+    #[arg(long)]
+    pub instrumental: bool,
+
+    /// Song title (defaults to a title derived from the theme)
+    #[arg(long)]
+    pub title: Option<String>,
+
+    /// Composition mode
+    #[arg(long, value_enum, default_value_t = WriteMode::Songwriting)]
+    pub mode: WriteMode,
+
+    /// [priming] Named consenting target or anonymised batch descriptor
+    #[arg(long)]
+    pub target: Option<String>,
+
+    /// [priming] Specific, falsifiable priming objective
+    #[arg(long)]
+    pub objective: Option<String>,
+
+    /// [priming] Domain: investment/marketing/sales/political/health/other
+    #[arg(long)]
+    pub domain: Option<String>,
+
+    /// [priming] Subtlety dial: stealth/medium/overt
+    #[arg(long)]
+    pub subtlety: Option<String>,
+
+    /// Write the song to a file instead of stdout
+    #[arg(long)]
+    pub out: Option<String>,
+}
+
+/// Composition modes. Extensible: add a variant here and one match arm in
+/// `commands::write` to ship a new mode.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WriteMode {
+    /// The base songwriting grammar scaffold
+    #[default]
+    Songwriting,
+    /// Priming-research scaffold (chill lounge + Prime-Stack Map)
+    Priming,
+}
+
+impl WriteMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Songwriting => "songwriting",
+            Self::Priming => "priming",
+        }
+    }
 }
 
 #[derive(clap::Args)]

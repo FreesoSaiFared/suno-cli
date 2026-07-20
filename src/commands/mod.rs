@@ -4,3 +4,4 @@ pub mod doctor;
 pub mod guide;
 pub mod skill;
 pub mod update;
+pub mod write;

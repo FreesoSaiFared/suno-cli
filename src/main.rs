@@ -940,6 +940,8 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
 
         Commands::Contract { code } => commands::contract::run(fmt, code)?,
 
+        Commands::Write(args) => commands::write::run(args, fmt, cli.quiet)?,
+
         Commands::Guide(args) => commands::guide::run(args.name, fmt, cli.quiet)?,
 
         Commands::AgentInfo => commands::agent_info::run(),
