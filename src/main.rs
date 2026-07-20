@@ -1001,7 +1001,18 @@ async fn main() {
     };
 
     let fmt = OutputFormat::detect(cli.json);
-    if let Err(e) = run(cli, fmt).await {
+    // Race the command against Ctrl-C so the solver Chrome is torn down on
+    // every exit path — it must never outlive the invocation.
+    let result = tokio::select! {
+        r = run(cli, fmt) => r,
+        _ = tokio::signal::ctrl_c() => {
+            captcha::shutdown().await;
+            eprintln!("Interrupted");
+            std::process::exit(130);
+        }
+    };
+    captcha::shutdown().await;
+    if let Err(e) = result {
         if json_mode {
             output::json::error(e.error_code(), &e.to_string(), e.suggestion());
         } else {

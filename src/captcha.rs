@@ -5,18 +5,19 @@
 //! response. Headless HTTP clients can't pass it; only a real browser with
 //! a warm behavioural fingerprint does.
 //!
-//! This module spawns a headed Chrome instance shoved far offscreen (no window
-//! on screen, no focus steal) with `--remote-debugging-port` enabled, injects
-//! the user's Suno cookies via CDP, navigates to suno.com/create, then renders
-//! an invisible hCaptcha widget and calls `hcaptcha.execute()` to obtain a
-//! token. The Chrome instance is reused across calls so subsequent generations
-//! are fast.
+//! This module pilots a Chrome instance with `--remote-debugging-port`
+//! enabled, injects the user's Suno cookies via CDP, navigates to
+//! suno.com/create, then renders an invisible hCaptcha widget and calls
+//! `hcaptcha.execute()` to obtain a token.
 //!
-//! Both legacy `--headless` and the re-architected `--headless=new` (Chrome
-//! 109+) are still flagged by Suno's hCaptcha and return "challenge-expired"
-//! (headless=new verified failing 2026-07-18), so headless is NOT the default.
-//! `SUNO_CAPTCHA_HEADLESS=1` opts into `--headless=new` for re-testing when
-//! Chrome/hCaptcha behaviour changes.
+//! Mode policy: try `--headless=new` first (no window, no Dock icon); if the
+//! solve fails — hCaptcha has historically flagged headless Chrome with
+//! "challenge-expired" — transparently retry once in a headed instance shoved
+//! far offscreen (no window on screen, no focus steal). `SUNO_CAPTCHA_HEADLESS=1`
+//! pins headless (no fallback, for re-testing); `SUNO_CAPTCHA_HEADED=1` pins
+//! headed. Whatever we spawn is killed when the CLI exits — the solver must
+//! never outlive the invocation; within one invocation the instance is reused
+//! so back-to-back solves stay fast.
 //!
 //! Discovered + verified end-to-end on 2026-04-08.
 
@@ -56,11 +57,30 @@ fn active_port() -> u16 {
     ACTIVE_PORT.load(Ordering::Relaxed)
 }
 
-/// Singleton holder for the Chrome process so the same instance survives
-/// across multiple `generate()` calls within one CLI invocation.
-static CHROME: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
+/// How the solver Chrome is displayed. Headless is tried first (fully
+/// invisible); Headed is the offscreen-window fallback for when hCaptcha
+/// flags headless.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChromeMode {
+    Headless,
+    Headed,
+}
 
-fn chrome_slot() -> &'static Mutex<Option<Child>> {
+impl ChromeMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Headless => "headless",
+            Self::Headed => "offscreen",
+        }
+    }
+}
+
+/// Singleton holder for the Chrome process (and the mode it was spawned in)
+/// so the same instance survives across multiple `generate()` calls within
+/// one CLI invocation. Killed by `shutdown()` when the CLI exits.
+static CHROME: OnceLock<Mutex<Option<(Child, ChromeMode)>>> = OnceLock::new();
+
+fn chrome_slot() -> &'static Mutex<Option<(Child, ChromeMode)>> {
     CHROME.get_or_init(|| Mutex::new(None))
 }
 
@@ -76,10 +96,38 @@ fn solve_lock() -> &'static Mutex<()> {
 
 /// Solve a fresh hCaptcha challenge and return the token to attach to a
 /// `/api/generate/v2-web/` request body.
+///
+/// Headless first; if hCaptcha rejects it (it fingerprints headless Chrome
+/// intermittently), fall back once to a headed instance parked offscreen.
+/// `SUNO_CAPTCHA_HEADLESS=1` / `SUNO_CAPTCHA_HEADED=1` pin a mode.
 pub async fn solve(auth: &AuthState) -> Result<String, CliError> {
     // One solve at a time across the whole process (see SOLVE_LOCK).
     let _serialized = solve_lock().lock().await;
-    ensure_chrome_running().await?;
+
+    let pin_headless = env_flag("SUNO_CAPTCHA_HEADLESS");
+    let pin_headed = env_flag("SUNO_CAPTCHA_HEADED");
+    let first = if pin_headed {
+        ChromeMode::Headed
+    } else {
+        ChromeMode::Headless
+    };
+
+    match solve_in(first, auth).await {
+        Err(e) if first == ChromeMode::Headless && !pin_headless => {
+            eprintln!("Headless solve failed ({e}) — retrying with an offscreen window...");
+            shutdown().await;
+            solve_in(ChromeMode::Headed, auth).await
+        }
+        other => other,
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| v == "1")
+}
+
+async fn solve_in(mode: ChromeMode, auth: &AuthState) -> Result<String, CliError> {
+    ensure_chrome_running(mode).await?;
     let target = find_or_create_suno_tab().await?;
     // A malicious local listener on the debug port can hand back a remote
     // debugger URL to siphon the injected Clerk cookie. Only attach to
@@ -90,8 +138,18 @@ pub async fn solve(auth: &AuthState) -> Result<String, CliError> {
             target.web_socket_debugger_url
         )));
     }
-    let token = render_and_execute(&target.web_socket_debugger_url, auth).await?;
-    Ok(token)
+    render_and_execute(&target.web_socket_debugger_url, auth).await
+}
+
+/// Kill the Chrome this process spawned, if any. Called on every CLI exit
+/// path (and before a mode-fallback respawn) — the solver must never outlive
+/// the invocation. Instances we didn't spawn are never touched.
+pub async fn shutdown() {
+    let mut slot = chrome_slot().lock().await;
+    if let Some((mut child, _)) = slot.take() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
 }
 
 /// Reject a CDP target whose debugger URL is not loopback. Parses the
@@ -124,46 +182,53 @@ fn is_loopback_ws(ws_url: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// Detect a CDP endpoint answering on the solver port. Called from commands
-/// that never spawn Chrome themselves (`config check`, future `doctor`), so a
-/// hit means a solver Chrome left over from a previous run. Report only —
-/// the instance is reused by later solves and must never be auto-killed.
+/// Detect a CDP endpoint answering on the solver's preferred port. The CLI
+/// kills its own Chrome on exit, so a hit means a crashed run (or some other
+/// tool) left an instance behind. Report only — solves never attach to an
+/// instance this process didn't spawn, so a leftover is inert.
 pub async fn detect_solver_chrome() -> Option<u16> {
     cdp_version().await.ok().map(|_| CDP_PORT)
 }
 
-/// Either reuse a Chrome instance already listening on the active port or
-/// spawn a new hidden one with the suno-cli profile dir. Idempotent.
-async fn ensure_chrome_running() -> Result<(), CliError> {
-    // Reuse only a listener we can positively identify as Chromium-family: an
-    // unrelated local service that merely answers the debug port must never
-    // receive our Suno cookies. A stranger on the preferred port pushes us to
-    // an OS-assigned port for our own instance (its profile is free, so the
-    // spawn won't collide).
-    match cdp_version().await {
-        Ok(ver) if cdp_looks_like_chrome(&ver) => return Ok(()),
-        Ok(_) => {
-            let port = free_loopback_port()?;
-            ACTIVE_PORT.store(port, Ordering::Relaxed);
+/// Reuse the managed Chrome when it's alive and in the requested mode;
+/// otherwise (re)spawn one. Only ever attaches to an instance this process
+/// spawned — anything else squatting on the preferred port (a crashed run's
+/// leftover, an unrelated service) just pushes us to an OS-assigned port, so
+/// our Suno cookies can't reach a stranger.
+async fn ensure_chrome_running(mode: ChromeMode) -> Result<(), CliError> {
+    {
+        let mut slot = chrome_slot().lock().await;
+        if let Some((_, running_mode)) = slot.as_ref() {
+            if *running_mode == mode && cdp_version().await.is_ok() {
+                return Ok(());
+            }
+            // Wrong mode or dead — replace it.
+            if let Some((mut child, _)) = slot.take() {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+            }
         }
-        Err(_) => {}
     }
 
-    // Need to spawn it.
+    // Bind-test the preferred port: free → use it, occupied → OS-assigned.
+    let port = match std::net::TcpListener::bind((CDP_HOST, CDP_PORT)) {
+        Ok(probe) => {
+            drop(probe);
+            CDP_PORT
+        }
+        Err(_) => free_loopback_port()?,
+    };
+    ACTIVE_PORT.store(port, Ordering::Relaxed);
+
     let chrome_path = locate_chrome()?;
     let profile_dir = crate::config::data_dir().join("chrome-profile");
     std::fs::create_dir_all(&profile_dir)?;
 
-    // Default: a headed Chrome shoved far offscreen. --headless=new
-    // (SUNO_CAPTCHA_HEADLESS=1) is still flagged by Suno's hCaptcha and returns
-    // "challenge-expired", so it stays a gated re-test hook, not the default.
-    // Either way keep a desktop-sized viewport: a 1x1 window makes Suno serve
-    // its mobile interstitial, which never loads hCaptcha.
-    let headless = std::env::var("SUNO_CAPTCHA_HEADLESS").is_ok_and(|v| v == "1");
-    let port = active_port();
+    // Either mode keeps a desktop-sized viewport: a 1x1 window makes Suno
+    // serve its mobile interstitial, which never loads hCaptcha.
     eprintln!(
-        "Launching {} Chrome for captcha solver (one-time per session)...",
-        if headless { "headless" } else { "offscreen" }
+        "Launching {} Chrome for captcha solver (cleaned up on exit)...",
+        mode.label()
     );
 
     let mut cmd = Command::new(&chrome_path);
@@ -174,29 +239,36 @@ async fn ensure_chrome_running() -> Result<(), CliError> {
         .arg("--disable-search-engine-choice-screen")
         .arg("--disable-features=TranslateUI")
         .arg("--window-size=1280,900");
-    if headless {
-        cmd.arg("--headless=new");
-    } else {
-        cmd.arg("--window-position=-32000,-32000")
-            .arg("--silent-launch");
+    match mode {
+        ChromeMode::Headless => {
+            cmd.arg("--headless=new");
+        }
+        ChromeMode::Headed => {
+            cmd.arg("--window-position=-32000,-32000")
+                .arg("--silent-launch");
+        }
     }
     let mut child = cmd
         .arg("about:blank")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| CliError::Config(format!("failed to spawn Chrome at {chrome_path:?}: {e}")))?;
     drain_stderr(&mut child);
 
     {
         let mut slot = chrome_slot().lock().await;
-        *slot = Some(child);
+        *slot = Some((child, mode));
     }
 
-    // Wait up to 10s for CDP to come up
+    // Wait up to 10s for CDP to come up, and insist the responder is really
+    // our Chromium (defense-in-depth against a port race).
     for _ in 0..20 {
         sleep(Duration::from_millis(500)).await;
-        if cdp_version().await.is_ok() {
+        if let Ok(ver) = cdp_version().await
+            && cdp_looks_like_chrome(&ver)
+        {
             return Ok(());
         }
     }

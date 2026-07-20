@@ -186,10 +186,15 @@ async fn check_solver_chrome(checks: &mut Vec<DoctorCheck>) {
     match crate::captcha::detect_solver_chrome().await {
         Some(port) => checks.push(DoctorCheck::warn(
             "solver_chrome",
-            format!("a solver Chrome from a previous run is still listening on port {port}"),
+            format!(
+                "something is still listening on solver port {port} — suno normally \
+                 kills its Chrome on exit, so this is a crashed run's leftover or an \
+                 unrelated service"
+            ),
             Some(format!(
-                "It will be reused by future solves; quit it via Activity Monitor \
-                 (Chrome with --remote-debugging-port={port}) if unwanted"
+                "Solves never attach to it (they pick a fresh port), so it's inert; \
+                 quit it via Activity Monitor (Chrome with --remote-debugging-port={port}) \
+                 to reclaim memory"
             )),
         )),
         None => checks.push(DoctorCheck::pass("solver_chrome", "no leftover instance")),
