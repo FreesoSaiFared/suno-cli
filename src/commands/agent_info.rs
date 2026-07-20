@@ -132,6 +132,30 @@ fn command_map() -> serde_json::Map<String, Value> {
             }),
         ),
         (
+            "write",
+            json!({
+                "description": "Compose a Suno-ready song scaffold from the built-in grammar (Style Prompt + meta-tagged lyric skeleton + Suno Tags + the ready-to-run `suno generate` command). Free, no credits used",
+                "args": [],
+                "options": [
+                    {"name": "--theme", "type": "string", "required": false, "description": "What the song is about (fills the {theme} placeholders)"},
+                    {"name": "--genre", "type": "string", "required": false, "description": "Genre or subgenre (fuzzy match; unknown → used verbatim as a style tag)"},
+                    {"name": "--mood", "type": "string", "required": false, "description": "Mood override, e.g. \"bittersweet and hopeful\" (else the genre default)"},
+                    {"name": "--vocal", "type": "string", "required": false, "values": ["male", "female"], "description": "Vocal gender direction"},
+                    {"name": "--bpm", "type": "number", "required": false, "description": "Tempo in BPM (else the genre's default tempo)"},
+                    {"name": "--viral", "type": "bool", "required": false, "default": false, "description": "Add earworm/hook meta-tags and catchiness tags"},
+                    {"name": "--instrumental", "type": "bool", "required": false, "default": false, "description": "No vocals, no lyric placeholders"},
+                    {"name": "--title", "type": "string", "required": false, "description": "Song title (else derived from the theme)"},
+                    {"name": "--mode", "type": "string", "required": false, "default": "songwriting", "values": ["songwriting", "priming"], "description": "Composition mode (unknown → exit 3)"},
+                    {"name": "--target", "type": "string", "required": false, "description": "[priming] Named consenting target or anonymised batch descriptor"},
+                    {"name": "--objective", "type": "string", "required": false, "description": "[priming] Specific, falsifiable priming objective"},
+                    {"name": "--domain", "type": "string", "required": false, "description": "[priming] investment/marketing/sales/political/health/other"},
+                    {"name": "--subtlety", "type": "string", "required": false, "description": "[priming] Subtlety dial: stealth/medium/overt"},
+                    {"name": "--out", "type": "string", "required": false, "description": "Write the song to a file instead of stdout"}
+                ],
+                "raw_output": "human mode: raw plain text on stdout (Title / Style Prompt / Lyrics skeleton / Suno Tags), with the write→generate handoff on stderr; JSON envelope when piped or --json"
+            }),
+        ),
+        (
             "extend",
             json!({
                 "description": "Continue/extend a clip from a timestamp",

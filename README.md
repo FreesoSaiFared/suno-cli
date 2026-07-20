@@ -110,11 +110,53 @@ suno describe --prompt "a chill lo-fi track about rainy mornings" --wait
 
 Generation costs ~70 credits per call on v5.5 (35 per clip, 2 clips per call — measured live). Older models are cheaper; `suno lyrics` is free. Check `suno models` for what your plan can use.
 
+## Write a song
+
+`suno write` is the way to compose. It assembles a Suno-ready song scaffold from a genre grammar compiled into the binary — a Style Prompt line, a meta-tagged `[Verse]`/`[Chorus]` skeleton with inline `<...>` lyric placeholders, and a Suno Tags line — then hands you the exact `suno generate` command to run. The grammar is executable, so you never hand-assemble a style prompt: run one command, fill the `<...>` slots, generate.
+
+```bash
+# 1. Scaffold the song (free, no credits) — plain text to stdout, or --out to a file
+suno write --genre "indie rock" --theme "late-night city drives" --vocal male --viral --out song.txt
+
+# 2. Fill the <...> lyric lines in song.txt, then generate the audio
+suno generate --title "..." --tags "..." --lyrics-file song.txt --model v4.5-all --wait --download ./songs/
+```
+
+Fuzzy genre matching covers ~24 subgenres; an unknown genre is passed through verbatim as a style tag, so `write` never fails on input. In human mode the song is raw plain text on stdout and the ready-to-run `suno generate` command prints to stderr; piped or with `--json` you get a `{title, mode, genre, style_prompt, structure, suno_tags, structure_tags, bpm, vocal, theme, viral, instrumental, generate}` envelope.
+
+### Priming / research songs
+
+`--mode priming` swaps in a chill-lounge, low-arousal scaffold (72 BPM) and appends a Prime-Stack Map table plus a research-artefact block:
+
+```bash
+suno write --mode priming \
+  --target "anonymised batch (n=40)" \
+  --objective "increase recall of brand X" \
+  --domain marketing --subtlety stealth --out song.txt
+```
+
+The deep references live in the built-in guides: `suno guide songwriting` for the full grammar, `suno guide priming` for the consent frame, evidence-graded prime library, and quality gates.
+
+| Flag | What it does | Values |
+|---|---|---|
+| `--theme` | What the song is about | free text |
+| `--genre` | Genre/subgenre | fuzzy match; unknown → verbatim style tag |
+| `--mood` | Mood override | e.g. `"bittersweet and hopeful"` (else genre default) |
+| `--vocal` | Vocal gender direction | male, female |
+| `--bpm` | Tempo | number (else the genre's default) |
+| `--viral` | Add earworm/hook meta-tags | flag |
+| `--instrumental` | No vocals, no lyric placeholders | flag |
+| `--title` | Song title | free text (else derived from theme) |
+| `--mode` | Composition mode | songwriting (default), priming |
+| `--target` / `--objective` / `--domain` / `--subtlety` | Priming research fields | `--mode priming` only |
+| `--out` | Write the song to a file | path (else stdout) |
+
 ## Commands
 
 ### Create
 
 ```
+suno write           Compose a Suno-ready song scaffold from the built-in grammar (free)
 suno generate        Custom mode — lyrics + tags + title + sliders + voice persona
 suno describe        Description mode — Suno writes lyrics from your prompt
 suno lyrics          Generate lyrics only (free, no credits)
