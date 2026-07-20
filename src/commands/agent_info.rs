@@ -29,6 +29,15 @@ fn remaster_model_map() -> serde_json::Map<String, Value> {
         .collect()
 }
 
+/// Top-level discovery list for the built-in guides, generated from the
+/// `guide` registry so it can never drift from what `suno guide` serves.
+fn guide_map() -> Vec<Value> {
+    crate::commands::guide::GUIDES
+        .iter()
+        .map(|g| json!({ "name": g.name, "description": g.description }))
+        .collect()
+}
+
 /// One `json!` per command: a single macro invocation for the whole map
 /// blows the macro recursion limit, and per-command blocks read better.
 fn command_map() -> serde_json::Map<String, Value> {
@@ -363,6 +372,19 @@ fn command_map() -> serde_json::Map<String, Value> {
             }),
         ),
         (
+            "guide",
+            json!({
+                "description": "List built-in songwriting guides, or print one as raw markdown to stdout",
+                "aliases": ["guides"],
+                "args": [{
+                    "name": "name", "kind": "positional", "type": "string", "required": false,
+                    "description": "Guide name or alias; omit to list all guides"
+                }],
+                "options": [],
+                "raw_output": "with a name: raw markdown on stdout (documented envelope exception)"
+            }),
+        ),
+        (
             "skill install",
             json!({
                 "description": "Install the agent skill to all detected platforms (idempotent)",
@@ -413,6 +435,8 @@ pub fn run() {
         "version": env!("CARGO_PKG_VERSION"),
         "description": "Suno AI music generation CLI — v5.5 with voice personas, covers, remasters",
         "commands": command_map(),
+        // Built-in songwriting knowledge, discoverable via `suno guide <name>`.
+        "guides": guide_map(),
         "global_flags": {
             "--json": {
                 "description": "Force JSON output (auto-enabled when piped)",

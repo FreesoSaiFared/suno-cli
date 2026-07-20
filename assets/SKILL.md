@@ -11,3 +11,4 @@ All capability detail lives in the binary, so it never drifts from this file:
 - `suno --help` / `suno <command> --help` — usage, tips, and real examples
 - First run: `suno auth --login`, then `suno doctor` to verify the setup
 - Piped output is a JSON envelope automatically; `lyrics` is free, generation ≈70 credits/call on v5.5
+- Writing a song? `suno guide` lists built-in guides — `suno guide songwriting` (the grammar) and `suno guide priming`

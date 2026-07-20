@@ -123,6 +123,10 @@ pub enum Commands {
     /// Machine-readable capabilities (for AI agents)
     AgentInfo,
 
+    /// Read built-in songwriting guides (list all, or print one)
+    #[command(visible_alias = "guides")]
+    Guide(GuideArgs),
+
     /// Manage the agent skill (teaches Claude Code / Codex / Gemini how to use this CLI)
     Skill(SkillArgs),
 
@@ -150,6 +154,12 @@ pub struct UpdateArgs {
     /// Bypass the duplicate-run guard
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(clap::Args)]
+pub struct GuideArgs {
+    /// Guide name or alias (e.g. songwriting, priming). Omit to list all guides.
+    pub name: Option<String>,
 }
 
 #[derive(clap::Args)]

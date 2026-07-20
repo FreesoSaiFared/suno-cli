@@ -154,9 +154,36 @@ suno auth            Set up authentication (--login | --refresh | --cookie | --j
 suno config          show | set | path | check
 suno doctor          Health checks: auth, JWT, Chrome, API reach, credits, captcha state
 suno agent-info      Machine-readable capabilities JSON
+suno guide           List built-in songwriting guides, or print one (guides <name>)
 suno skill           install | status — agent skill for Claude Code / Codex / Gemini
 suno update          Distribution-aware update (--check to peek first)
 ```
+
+## Guides
+
+The CLI ships its songwriting knowledge as built-in guides — a single source of truth compiled into the binary, so what agents read never drifts from the tool.
+
+```bash
+suno guide                  # list every guide (name, aliases, description)
+suno guide songwriting      # print the guide as raw markdown to stdout
+suno guide priming          # aliases resolve too: `write`, `grammar`, `prime`
+```
+
+| Guide | What it covers |
+| --- | --- |
+| `songwriting` | How to write for Suno: structure, meta-tags, genres, vocal styles, hooks — the base grammar every song builds on |
+| `priming` | Research/priming songs: evidence-graded psychological priming woven into lyrics, consent-first |
+
+Write, then generate — the guide's output maps straight onto the flags:
+
+```bash
+suno guide songwriting > song.md      # read it, draft the Style Prompt + [Verse]/[Chorus] block
+suno generate --title "Weekend Code" \
+  --tags "indie rock, upbeat, male vocals" \
+  --lyrics-file song.txt --wait --download ./songs/
+```
+
+Piped or `--json`, `suno guide <name>` returns a `{name, content}` envelope; the bare `suno guide` list returns an array of `{name, aliases, description}`.
 
 ## Features
 
