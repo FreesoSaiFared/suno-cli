@@ -1,6 +1,6 @@
 ---
 name: suno
-description: Generate AI music from the terminal using the `suno` CLI. Use when user asks to "generate a song", "make music", "create AI music", "make a track", "generate audio", or wants to programmatically use Suno for custom lyrics, tags, voice personas, covers, remasters, or stems. Also use when downloading Suno songs (auto-embeds lyrics into MP3). Run `suno agent-info` for the full machine-readable capability dump. NOT for writing song prompts/lyrics without generating audio — use `suno-song-generator` for that.
+description: Generate AI music from the terminal using the `suno` CLI. Use when user asks to "generate a song", "make music", "create AI music", "make a track", "generate audio", "write a song/lyrics for Suno", or wants to programmatically use Suno for custom lyrics, tags, voice personas, covers, remasters, or stems. Also use when downloading Suno songs (auto-embeds lyrics into MP3). For how to write for Suno, run `suno guide songwriting`; run `suno agent-info` for the full machine-readable capability dump.
 ---
 
 # suno CLI
