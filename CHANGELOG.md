@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.8.0 — the composer and the renderer agree about the artifact
+
+One invariant now holds end to end: the file named by the emitted generate command exists, is directly consumable by `--lyrics-file`, contains no unresolved instructions, and reflects every selected control.
+
+**Breaking** (agents reading `write --json`):
+
+- `write --out FILE` writes the **lyric block only**. It previously wrote a composite document (title, Style Prompt, `---` rules, Suno Tags, and in priming mode the Prime-Stack Map and research artefact) that the emitted workflow then handed to `--lyrics-file` — so headers, tags and research metadata were sent to Suno as lyrics and embedded in the MP3. The composite document moved to the new `--project-out FILE`.
+- The `generate` string field is replaced by `next_action: {argv, command}`. `argv` is authoritative; `command` is shell-escaped display text. It is `null` when no `--out` file exists, instead of advertising a hardcoded `song.txt` that was never written.
+- `write --mode priming` requires `--target`, `--objective` and `--domain` (exit 3 when missing) — priming is consent-based and every run must be auditable. `--domain` and `--subtlety` values are validated.
+- `guide` lost the `write` alias (it competed with the `suno write` command).
+
+**Fixes:**
+
+- `--mood` / `--vocal` / `--bpm` / `--instrumental` now drive the Style Prompt, the `[Mood:]`/`[Energy:]`/vocal meta-tags and `suno_tags` from one resolved-controls struct. `--mood "dark and brooding"` no longer emitted `[Mood: Uplifting]` and an "uplifting" tag alongside it.
+- `--instrumental` is coherent: no `<...>` fill instructions, `--instrumental` in the emitted command, no vocal-only tags.
+- Titles and paths in the emitted command are shell-escaped (`She Said "Go"` produced invalid shell).
+- `generate` refuses lyrics containing unresolved `<...>` scaffold placeholders (exit 3, naming the line numbers) so an unfilled draft cannot burn ~70 credits. `--force` overrides.
+- The emitted command no longer pins `--model v4.5-all` while help and config advertise v5.5 — it omits `--model` so the configured default applies, and names the cheap-draft option separately.
+- New fields: `placeholders_remaining`, `ready_to_generate`, `missing_requirements`, `project_written`.
+
+**Discovery:**
+
+- `write` leads the command list in `--help`; the root example is the full write → fill → generate → download flow, with a one-liner distinguishing write/generate/describe/lyrics. README Quick Start mirrors it.
+- `write --help` no longer claims plain text on stdout while the framework sends JSON when piped: shell redirection gets the envelope, `--out` gets the lyrics file.
+- `agent-info` gained the `write` output schema, workflow, and mode-specific required fields.
+
 ## v0.6.0 — framework conformance, captcha preflight, real config
 
 **Breaking** (agents pinned to the 0.5.x contract must update):

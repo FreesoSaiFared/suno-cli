@@ -2,7 +2,7 @@
 
 # suno
 
-**Generate AI music from your terminal — full Suno v5.5 support**
+**Write and generate AI music from your terminal — full Suno v5.5 support**
 
 <br />
 
@@ -86,25 +86,24 @@ suno doctor
 # 3. Check your credits
 suno credits
 
-# 4. Generate a song with full control
+# 4. Write a song — the composer scaffolds it, you fill the <...> lyric slots
+suno write --genre "indie rock" --theme "late-night city drives" --vocal male --out song.txt
+
+# 5. Generate the audio from the file you just filled (write prints this exact command)
 suno generate \
-  --title "Weekend Code" \
-  --tags "indie rock, guitar, upbeat" \
-  --exclude "metal, heavy" \
-  --lyrics-file lyrics.txt \
-  --vocal male \
-  --weirdness 40 \
-  --style-influence 65 \
+  --title "Night Drive" \
+  --tags "Indie rock, jangly and nostalgic, 110 BPM, warm male vocals, clean guitars, driving drums" \
+  --lyrics-file song.txt \
   --wait --download ./songs/
 
-# 5. Generate with your voice persona
+# 6. Generate with your voice persona
 suno generate \
   --title "My Song" \
   --tags "pop, warm" \
   --persona e483d2f0-50ca-4a09-8a74-b9e074646377 \
   --lyrics "[Verse]\nHello from the CLI"
 
-# 6. Let Suno write the lyrics for you
+# 7. Or skip the composer and let Suno write the lyrics from a description
 suno describe --prompt "a chill lo-fi track about rainy mornings" --wait
 ```
 
@@ -115,14 +114,18 @@ Generation costs ~70 credits per call on v5.5 (35 per clip, 2 clips per call —
 `suno write` is the way to compose. It assembles a Suno-ready song scaffold from a genre grammar compiled into the binary — a Style Prompt line, a meta-tagged `[Verse]`/`[Chorus]` skeleton with inline `<...>` lyric placeholders, and a Suno Tags line — then hands you the exact `suno generate` command to run. The grammar is executable, so you never hand-assemble a style prompt: run one command, fill the `<...>` slots, generate.
 
 ```bash
-# 1. Scaffold the song (free, no credits) — plain text to stdout, or --out to a file
+# 1. Scaffold the song (free, no credits) — --out writes the lyric block to a file
 suno write --genre "indie rock" --theme "late-night city drives" --vocal male --viral --out song.txt
 
-# 2. Fill the <...> lyric lines in song.txt, then generate the audio
-suno generate --title "..." --tags "..." --lyrics-file song.txt --model v4.5-all --wait --download ./songs/
+# 2. Fill the <...> lyric lines in song.txt, then run the command `write` printed
+suno generate --title "..." --tags "..." --lyrics-file song.txt --wait --download ./songs/
 ```
 
-Fuzzy genre matching covers ~24 subgenres; an unknown genre is passed through verbatim as a style tag, so `write` never fails on input. In human mode the song is raw plain text on stdout and the ready-to-run `suno generate` command prints to stderr; piped or with `--json` you get a `{title, mode, genre, style_prompt, structure, suno_tags, structure_tags, bpm, vocal, theme, viral, instrumental, generate}` envelope.
+`--out` writes the **lyric block only** — no title, no style prompt, no tag list — so the file feeds `generate --lyrics-file` directly and nothing but lyrics reaches the model. The title, Style Prompt and Suno Tags go to stderr (human mode) and into the JSON envelope; `--project-out FILE` additionally saves the full composite document for humans. `suno generate` refuses lyrics that still contain `<...>` scaffold placeholders (exit 3, naming the line numbers), so an unfilled draft can never burn credits — `--force` overrides.
+
+Note that shell redirection (`suno write > song.txt`) receives the JSON envelope, not lyrics: output is a JSON envelope whenever stdout is not a terminal. `--out` is the way to get an editable lyrics file.
+
+Fuzzy genre matching covers ~24 subgenres; an unknown genre is passed through verbatim as a style tag, so `write` never fails on input. Piped or with `--json` you get a `{title, mode, genre, style_prompt, structure, suno_tags, structure_tags, bpm, vocal, theme, viral, instrumental, placeholders_remaining, ready_to_generate, missing_requirements, next_action, written}` envelope. `next_action.argv` is the authoritative handoff — run it as argv, never shell-parse `next_action.command`. It is `null` until `--out` names a real file, and the emitted command omits `--model` so your configured default applies (add `--model v4.5-all` for a ~10-credit draft).
 
 ### Priming / research songs
 
@@ -135,6 +138,8 @@ suno write --mode priming \
   --domain marketing --subtlety stealth --out song.txt
 ```
 
+Priming is consent-based, so `--target`, `--objective` and `--domain` are required: an incomplete request exits 3 with the missing flags named, rather than emitting a scaffold and a ready-to-run command. The objective also seeds the song theme. The Prime-Stack Map and research artefact stay out of the lyrics file — they live in the JSON envelope and `--project-out`.
+
 The deep references live in the built-in guides: `suno guide songwriting` for the full grammar, `suno guide priming` for the consent frame, evidence-graded prime library, and quality gates.
 
 | Flag | What it does | Values |
@@ -145,11 +150,14 @@ The deep references live in the built-in guides: `suno guide songwriting` for th
 | `--vocal` | Vocal gender direction | male, female |
 | `--bpm` | Tempo | number (else the genre's default) |
 | `--viral` | Add earworm/hook meta-tags | flag |
-| `--instrumental` | No vocals, no lyric placeholders | flag |
+| `--instrumental` | No vocals, no lyric placeholders; adds `--instrumental` to the emitted command | flag |
 | `--title` | Song title | free text (else derived from theme) |
 | `--mode` | Composition mode | songwriting (default), priming |
-| `--target` / `--objective` / `--domain` / `--subtlety` | Priming research fields | `--mode priming` only |
-| `--out` | Write the song to a file | path (else stdout) |
+| `--target` / `--objective` / `--domain` | Priming research fields | required with `--mode priming` |
+| `--subtlety` | Priming subtlety dial | stealth, medium (default), overt |
+| `--out` | Write the lyric block to a file (the generation input) | path |
+| `--project-out` | Write the composite human document to a file | path |
+| `--download` | Download dir baked into the emitted generate command | path (default `./`) |
 
 ## Commands
 
