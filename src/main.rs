@@ -456,6 +456,19 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 (_, Some(path)) => Some(read_input_file(path)?),
                 _ => None,
             };
+            // Credit protection: an unfilled `suno write` scaffold would be
+            // sung verbatim at ~70 credits a call. Refuse it unless forced.
+            if let Some(text) = lyrics.as_deref() {
+                let lines = commands::write::placeholder_lines(text);
+                if !lines.is_empty() && !args.force {
+                    let numbers: Vec<String> = lines.iter().map(|n| n.to_string()).collect();
+                    return Err(CliError::InvalidInput(format!(
+                        "lyrics contain {} unresolved scaffold placeholder(s) at line(s) {} — fill the <...> spans before generating (or pass --force to send them as written)",
+                        lines.len(),
+                        numbers.join(", ")
+                    )));
+                }
+            }
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
             let control_sliders =
                 build_control_sliders(args.weirdness, args.style_influence, args.audio_influence);
