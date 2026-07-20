@@ -21,7 +21,9 @@ pub struct Guide {
 pub const GUIDES: &[Guide] = &[
     Guide {
         name: "songwriting",
-        aliases: &["grammar", "write"],
+        // No `write` alias: `suno write` is a command, and `suno guide write`
+        // reading as a synonym for it confused the composer with its manual.
+        aliases: &["grammar", "songwriting-guide"],
         description: "How to write for Suno: structure, meta-tags, genres, vocal styles, hooks (the base grammar)",
         content: include_str!("../../assets/guides/songwriting.md"),
     },

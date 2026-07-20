@@ -134,7 +134,7 @@ fn command_map() -> serde_json::Map<String, Value> {
         (
             "write",
             json!({
-                "description": "Compose a Suno-ready song scaffold from the built-in grammar (Style Prompt + meta-tagged lyric skeleton + Suno Tags + the ready-to-run `suno generate` command). Free, no credits used",
+                "description": "Compose a Suno-ready song scaffold from the built-in grammar (Style Prompt + meta-tagged lyric skeleton + Suno Tags + a structured next_action for `suno generate`). Free, no credits used",
                 "args": [],
                 "options": [
                     {"name": "--theme", "type": "string", "required": false, "description": "What the song is about (fills the {theme} placeholders)"},
@@ -143,16 +143,44 @@ fn command_map() -> serde_json::Map<String, Value> {
                     {"name": "--vocal", "type": "string", "required": false, "values": ["male", "female"], "description": "Vocal gender direction"},
                     {"name": "--bpm", "type": "number", "required": false, "description": "Tempo in BPM (else the genre's default tempo)"},
                     {"name": "--viral", "type": "bool", "required": false, "default": false, "description": "Add earworm/hook meta-tags and catchiness tags"},
-                    {"name": "--instrumental", "type": "bool", "required": false, "default": false, "description": "No vocals, no lyric placeholders"},
+                    {"name": "--instrumental", "type": "bool", "required": false, "default": false, "description": "No vocals and no lyric placeholders; the emitted generate command carries --instrumental"},
                     {"name": "--title", "type": "string", "required": false, "description": "Song title (else derived from the theme)"},
                     {"name": "--mode", "type": "string", "required": false, "default": "songwriting", "values": ["songwriting", "priming"], "description": "Composition mode (unknown → exit 3)"},
-                    {"name": "--target", "type": "string", "required": false, "description": "[priming] Named consenting target or anonymised batch descriptor"},
-                    {"name": "--objective", "type": "string", "required": false, "description": "[priming] Specific, falsifiable priming objective"},
-                    {"name": "--domain", "type": "string", "required": false, "description": "[priming] investment/marketing/sales/political/health/other"},
-                    {"name": "--subtlety", "type": "string", "required": false, "description": "[priming] Subtlety dial: stealth/medium/overt"},
-                    {"name": "--out", "type": "string", "required": false, "description": "Write the song to a file instead of stdout"}
+                    {"name": "--target", "type": "string", "required": false, "description": "[priming] REQUIRED. Named consenting target or anonymised batch descriptor"},
+                    {"name": "--objective", "type": "string", "required": false, "description": "[priming] REQUIRED. Specific, falsifiable priming objective (also seeds the song theme)"},
+                    {"name": "--domain", "type": "string", "required": false, "values": ["investment", "marketing", "sales", "political", "health", "other"], "description": "[priming] REQUIRED. Domain of the objective"},
+                    {"name": "--subtlety", "type": "string", "required": false, "default": "medium", "values": ["stealth", "medium", "overt"], "description": "[priming] Subtlety dial"},
+                    {"name": "--out", "type": "string", "required": false, "description": "Write the lyric block ONLY to FILE — the file `generate --lyrics-file` reads. No headers, tags or metadata"},
+                    {"name": "--project-out", "type": "string", "required": false, "description": "Also write the composite human document (title + style prompt + lyrics + tags + priming artefact). Never a generation input"},
+                    {"name": "--download", "type": "string", "required": false, "default": "./", "description": "Download directory baked into the emitted generate command"}
                 ],
-                "raw_output": "human mode: raw plain text on stdout (Title / Style Prompt / Lyrics skeleton / Suno Tags), with the write→generate handoff on stderr; JSON envelope when piped or --json"
+                "required_fields_by_mode": {
+                    "songwriting": [],
+                    "priming": ["--target", "--objective", "--domain"]
+                },
+                "output_schema": {
+                    "title": "string", "mode": "songwriting|priming", "genre": "string",
+                    "style_prompt": "string — pass verbatim to `generate --tags`; authoritative over suno_tags",
+                    "structure": "string — the lyric block; identical to the bytes written to --out",
+                    "suno_tags": "string — lower-level comma tag list, derived from the same resolved controls",
+                    "structure_tags": "array of the meta-tag vocabulary",
+                    "bpm": "number", "vocal": "male|female|null", "theme": "string|null",
+                    "viral": "bool", "instrumental": "bool",
+                    "placeholders_remaining": "number of unresolved <...> lines in `structure`",
+                    "ready_to_generate": "bool — false while placeholders remain or no --out file exists",
+                    "missing_requirements": "array of human-readable blockers to clear before generating",
+                    "next_action": "{argv: [string], command: string} or null — argv is authoritative, never shell-parse `command`. Null until --out names a real file",
+                    "written": "path of the lyrics file (present only with --out)",
+                    "project_written": "path of the composite document (present only with --project-out)",
+                    "priming": "{target, objective, domain, subtlety, prime_stack_map} (priming mode only)"
+                },
+                "workflow": [
+                    "suno write --genre <g> --theme <t> --out song.txt --json",
+                    "edit song.txt: replace every <...> span; keep [Section] tags; repeat the chorus verbatim",
+                    "run data.next_action.argv (add --model v4.5-all for a ~10-credit draft)",
+                    "`generate` exits 3 if any <...> placeholder survives, so no credits are burned on a scaffold"
+                ],
+                "raw_output": "human mode without --out: composite plain text on stdout (Title / Style Prompt / Lyrics skeleton / Suno Tags), handoff on stderr. With --out: nothing on stdout, the file holds lyrics only. JSON envelope when piped or --json"
             }),
         ),
         (
@@ -457,7 +485,7 @@ pub fn run() {
     let info = json!({
         "name": "suno",
         "version": env!("CARGO_PKG_VERSION"),
-        "description": "Suno AI music generation CLI — v5.5 with voice personas, covers, remasters",
+        "description": "Write, generate, and manage Suno music — a native song composer (`write`), v5.5 generation with voice personas, covers, remasters, and built-in songwriting guides",
         "commands": command_map(),
         // Built-in songwriting knowledge, discoverable via `suno guide <name>`.
         "guides": guide_map(),
@@ -514,6 +542,7 @@ pub fn run() {
             "note": "Older models cost less. `lyrics` is free.",
         },
         "features": [
+            "song_composer", "priming_mode", "builtin_guides",
             "tags", "negative_tags", "vocal_gender",
             "weirdness", "style_influence", "audio_influence",
             "instrumental", "extend", "concat", "cover", "remaster",

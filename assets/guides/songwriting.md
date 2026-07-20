@@ -1,11 +1,14 @@
 # Songwriting for Suno
 
-This is the base grammar of writing for Suno: the structure, meta tags, syllable discipline, style formula, and vocal/hook vocabulary that produce a clean, generatable song. Every other guide (`suno guide priming`, and any genre- or effect-specific guide) assumes what is written here and extends it. Read this first.
+Run `suno write` to scaffold the song; use this guide to fill and refine its output. `suno write --out song.txt` assembles the Style Prompt, the meta-tagged section skeleton, and the Suno Tags from the same grammar written up here, and prints the exact `suno generate` command — this document is the reference for what goes in the `<...>` slots and why, and for anything the scaffold does not cover.
+
+This is the base grammar of writing for Suno: the structure, meta tags, syllable discipline, style formula, and vocal/hook vocabulary that produce a clean, generatable song. Every other guide (`suno guide priming`, and any genre- or effect-specific guide) assumes what is written here and extends it.
 
 The song you write here is plain text that pastes straight into Suno or feeds the `suno` CLI. This document is markdown; the actual lyric/style output is not — see the output format below.
 
 ## Workflow
 
+0. Run `suno write --genre <genre> --theme <theme> --out song.txt`. Steps 1-5 below are then a refinement pass over what it produced; write from scratch only if the scaffold does not fit.
 1. Collect from the user: theme, genre, mood, vocal style. Supply sensible defaults for anything missing — do not block on questions.
 2. Pick genre-specific tag combinations from the genre tables below.
 3. Choose vocal direction, effects, and phrasing from the vocal styles section.
@@ -543,7 +546,7 @@ suno generate \
 
 Use `--model v4.5-all` for cheap drafts (~10 credits/call — the cheapest model, ideal for iterating on structure and hooks). When the song is right, re-run on a stronger model. `--wait` polls until the render is done; `--download ./` pulls the MP3 into the current directory and embeds the lyrics into the file's metadata.
 
-**Full `suno generate` flags** (v0.6.0):
+**Full `suno generate` flags** (v0.8.0):
 
 ```
 --title <str>              Song title
@@ -562,7 +565,7 @@ Use `--model v4.5-all` for cheap drafts (~10 credits/call — the cheapest model
 --download <dir>           Download the finished MP3 (embeds lyrics)
 --token <str>              Override the auth token
 --no-captcha               Skip the captcha solve step
---force                    Bypass confirmation guards
+--force                    Bypass the duplicate-run guard and the placeholder preflight
 ```
 
 **Cost**: v5.5 ≈ 70 credits/call; v4.5-all ≈ 10 credits/call (cheapest — use it for drafts). Downloading embeds the lyrics into the MP3.

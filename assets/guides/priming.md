@@ -768,7 +768,7 @@ suno generate \
 
 `--download` embeds the final lyrics into the MP3.
 
-**Verified `suno generate` flags (v0.6.0):**
+**Verified `suno generate` flags (v0.8.0):**
 
 | Flag | Purpose |
 |---|---|
@@ -788,6 +788,6 @@ suno generate \
 | `--download <dir>` | Download the finished MP3 (embeds lyrics) |
 | `--token <str>` | Override the auth token |
 | `--no-captcha` | Skip the captcha flow |
-| `--force` | Bypass safety/confirmation guards |
+| `--force` | Bypass the duplicate-run guard and the unresolved-placeholder preflight |
 
 **Cost:** `v5.5` ≈ 70 credits/call; `v4.5-all` ≈ 10 credits — the cheapest for iterating on drafts. `suno lyrics` is free (text only, no audio). Draft on `v4.5-all`, then re-run the winning lyric on a higher model if the fidelity matters for the listener test.
