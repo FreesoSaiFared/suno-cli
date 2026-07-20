@@ -6,6 +6,13 @@
 //! `assets/guides/songwriting.md`. The agent fills the `<...>` lyric
 //! placeholders, then runs `suno generate --lyrics-file`.
 //!
+//! Load-bearing invariant: the file named by the emitted generate command must
+//! exist, be directly consumable by `--lyrics-file`, carry no metadata that
+//! would be sung, and reflect every resolved control. `--out` therefore writes
+//! the lyric block ONLY; the composite human document (title, style prompt,
+//! tags, priming artefact) goes to `--project-out`, the JSON envelope, or
+//! stderr.
+//!
 //! Modes are extensible: add a `WriteMode` variant in `cli.rs` and a branch in
 //! `render_plain` / `compose` here — everything else derives from the registry.
 
@@ -528,6 +535,23 @@ fn apply_vocal_gender(desc: &str, gender: Option<Gender>) -> String {
     }
 }
 
+/// Derive the `[Mood: ...]` meta-tag word from a `--mood` override phrase, so
+/// the meta-tags and Suno Tags can never contradict the Style Prompt. Takes
+/// the first content word of the phrase ("dark and brooding" → "Dark").
+fn mood_tag_from(phrase: &str) -> String {
+    phrase
+        .split(|c: char| !c.is_alphanumeric() && c != '-')
+        .find(|w| {
+            !w.is_empty()
+                && !matches!(
+                    w.to_lowercase().as_str(),
+                    "and" | "the" | "a" | "an" | "very" | "with" | "but"
+                )
+        })
+        .map(title_case)
+        .unwrap_or_else(|| "Expressive".to_string())
+}
+
 /// A contrasting mood word for the bridge (dopamine architecture: contrast is
 /// the point). Uplifting moods drop to reflective; darker moods lift.
 fn contrast_mood(mood_tag: &str) -> &'static str {
@@ -537,6 +561,33 @@ fn contrast_mood(mood_tag: &str) -> &'static str {
         }
         _ => "Reflective",
     }
+}
+
+/// 1-based line numbers holding an unresolved scaffold placeholder — an
+/// angle-bracket instruction span (`<...>`) opened and closed on one line.
+/// Shared with `suno generate`'s preflight so a scaffold can never be sung.
+pub fn placeholder_lines(text: &str) -> Vec<usize> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| match l.find('<') {
+            Some(open) => l[open + 1..].contains('>'),
+            None => false,
+        })
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
+/// POSIX single-quote escaping for the display command. Bare-safe tokens stay
+/// unquoted; everything else is single-quoted with `'` closed and re-opened,
+/// so titles like `She Said "Go"` or `Rock 'n' Roll` survive a copy-paste.
+fn shell_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-/=:,+@".contains(c));
+    if safe {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Title-case a short phrase for a fallback title.
@@ -554,6 +605,7 @@ fn title_case(s: &str) -> String {
 }
 
 /// The fully-resolved song, ready to render as plain text or a JSON envelope.
+#[derive(Debug)]
 struct Composition {
     title: String,
     mode: WriteMode,
@@ -572,8 +624,14 @@ struct Composition {
     viral: bool,
     instrumental: bool,
     priming: Option<PrimingMeta>,
+    /// The lyrics file the emitted generate command will reference. `None`
+    /// means no file exists, so no ready-to-run command may be emitted.
+    out: Option<String>,
+    /// Download directory baked into the emitted generate command.
+    download: String,
 }
 
+#[derive(Debug)]
 struct PrimingMeta {
     target: String,
     objective: String,
@@ -581,9 +639,22 @@ struct PrimingMeta {
     subtlety: String,
 }
 
+/// Priming mode is consent-based (see `suno guide priming`); these fields are
+/// what makes a request auditable, so they are required, not decorative.
+const PRIMING_DOMAINS: &[&str] = &[
+    "investment",
+    "marketing",
+    "sales",
+    "political",
+    "health",
+    "other",
+];
+const SUBTLETY_LEVELS: &[&str] = &["stealth", "medium", "overt"];
+
 /// Build a `Composition` from parsed args. Never errors on genre: an unknown
-/// genre becomes a raw style tag with generic defaults.
-fn compose(args: &WriteArgs) -> Composition {
+/// genre becomes a raw style tag with generic defaults. Errors only when a
+/// mode's required fields are missing or out of range (exit 3).
+fn compose(args: &WriteArgs) -> Result<Composition, CliError> {
     // Priming mode defaults to the chill-lounge scaffold when no genre is set.
     let default_genre = match args.mode {
         WriteMode::Priming => Some("chill-lounge"),
@@ -601,7 +672,7 @@ fn compose(args: &WriteArgs) -> Composition {
         def_vocal,
         instruments,
         instrument_tag,
-        mood_tag,
+        mut mood_tag,
         energy,
         vocal_style,
     ) = match matched {
@@ -636,9 +707,11 @@ fn compose(args: &WriteArgs) -> Composition {
         }
     };
 
-    // --mood overrides the descriptive mood phrase in the Style Prompt.
+    // --mood overrides the descriptive phrase AND the [Mood: ...] meta-tag,
+    // which in turn drives suno_tags: one resolved control, no contradiction.
     if let Some(m) = args.mood.as_deref() {
         mood = m.to_string();
+        mood_tag = mood_tag_from(m);
     }
 
     let bpm = args.bpm.unwrap_or(def_bpm);
@@ -649,31 +722,70 @@ fn compose(args: &WriteArgs) -> Composition {
     };
     let vocal = apply_vocal_gender(&def_vocal, gender);
 
+    // Priming mode is consent-based: the fields that make a run auditable are
+    // required, so an incomplete request fails before any handoff is emitted.
+    let priming = match args.mode {
+        WriteMode::Priming => {
+            let mut missing: Vec<&str> = Vec::new();
+            for (flag, value) in [
+                ("--target", &args.target),
+                ("--objective", &args.objective),
+                ("--domain", &args.domain),
+            ] {
+                if value.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    missing.push(flag);
+                }
+            }
+            if !missing.is_empty() {
+                return Err(CliError::InvalidInput(format!(
+                    "--mode priming requires {} — priming is consent-based and every run must be auditable; see `suno guide priming`",
+                    missing.join(", ")
+                )));
+            }
+            let domain = args.domain.clone().unwrap_or_default();
+            if !PRIMING_DOMAINS.contains(&domain.to_lowercase().as_str()) {
+                return Err(CliError::InvalidInput(format!(
+                    "unknown --domain '{domain}' — expected one of: {}",
+                    PRIMING_DOMAINS.join(", ")
+                )));
+            }
+            let subtlety = args
+                .subtlety
+                .clone()
+                .unwrap_or_else(|| "medium".to_string());
+            if !SUBTLETY_LEVELS.contains(&subtlety.to_lowercase().as_str()) {
+                return Err(CliError::InvalidInput(format!(
+                    "unknown --subtlety '{subtlety}' — expected one of: {}",
+                    SUBTLETY_LEVELS.join(", ")
+                )));
+            }
+            Some(PrimingMeta {
+                target: args.target.clone().unwrap_or_default(),
+                objective: args.objective.clone().unwrap_or_default(),
+                domain,
+                subtlety,
+            })
+        }
+        WriteMode::Songwriting => None,
+    };
+
+    // The priming objective doubles as the song theme so the skeleton stops
+    // saying "your theme" for a request that already stated its subject.
+    let theme = args
+        .theme
+        .clone()
+        .or_else(|| priming.as_ref().map(|p| p.objective.clone()));
+
     let title = args
         .title
         .clone()
-        .or_else(|| args.theme.as_deref().map(title_case))
+        .or_else(|| theme.as_deref().map(title_case))
         .unwrap_or_else(|| match args.mode {
             WriteMode::Priming => "Untitled Session".to_string(),
             WriteMode::Songwriting => "Untitled Draft".to_string(),
         });
 
-    let priming = match args.mode {
-        WriteMode::Priming => Some(PrimingMeta {
-            target: args.target.clone().unwrap_or_else(|| {
-                "<named consenting target OR anonymised batch descriptor>".into()
-            }),
-            objective: args
-                .objective
-                .clone()
-                .unwrap_or_else(|| "<specific, falsifiable attitude or action>".into()),
-            domain: args.domain.clone().unwrap_or_else(|| "other".into()),
-            subtlety: args.subtlety.clone().unwrap_or_else(|| "medium".into()),
-        }),
-        WriteMode::Songwriting => None,
-    };
-
-    Composition {
+    Ok(Composition {
         title,
         mode: args.mode,
         genre_key,
@@ -687,11 +799,13 @@ fn compose(args: &WriteArgs) -> Composition {
         energy,
         vocal_style,
         gender,
-        theme: args.theme.clone(),
+        theme,
         viral: args.viral,
         instrumental: args.instrumental,
         priming,
-    }
+        out: args.out.clone(),
+        download: args.download.clone(),
+    })
 }
 
 impl Composition {
@@ -728,24 +842,37 @@ impl Composition {
         };
         push(&self.genre_tag, &mut tags);
         push(&self.mood_tag.to_lowercase(), &mut tags);
+        push(&format!("{} BPM", self.bpm), &mut tags);
         for i in self.instruments.split(',') {
             push(i, &mut tags);
         }
-        for v in self.vocal_style.split(',') {
-            push(&v.to_lowercase(), &mut tags);
-        }
+        // Vocal texture and gender only describe a song that has vocals.
         if self.instrumental {
             push("instrumental", &mut tags);
+        } else {
+            for v in self.vocal_style.split(',') {
+                push(&v.to_lowercase(), &mut tags);
+            }
+            if let Some(g) = self.gender {
+                push(&format!("{} vocals", g.word()), &mut tags);
+            }
         }
         if self.viral {
-            for t in [
-                "catchy hook",
-                "earworm",
-                "singalong",
-                "anthem",
-                "gang vocals",
-                "millennial whoop",
-            ] {
+            // The singalong/gang-vocal earworm tags describe voices; an
+            // instrumental takes only the ones it can actually deliver.
+            let hooks: &[&str] = if self.instrumental {
+                &["catchy hook", "earworm", "anthem"]
+            } else {
+                &[
+                    "catchy hook",
+                    "earworm",
+                    "singalong",
+                    "anthem",
+                    "gang vocals",
+                    "millennial whoop",
+                ]
+            };
+            for t in hooks {
                 push(t, &mut tags);
             }
         }
@@ -774,16 +901,18 @@ impl Composition {
             }
             s.push_str(&format!("[Vocal Style: {}]\n", self.vocal_style));
         }
-        if self.viral {
-            s.push_str("<land the hook in the first 7 seconds — the streaming skip threshold>\n");
+        if self.viral && !self.instrumental {
+            s.push_str(
+                "<delete this line: land the hook in the first 7 seconds — the streaming skip threshold>\n",
+            );
         }
 
         // Each section carries a vocal placeholder and a distinct instrumental
-        // direction; instrumental mode swaps in the latter so the scaffold never
-        // asks for "lines" in a song with no vocals.
+        // direction. Instrumental directions are FINAL meta-tags, not slots to
+        // fill: an instrumental scaffold is directly generatable as written.
         let body = |vocal_hint: &str, instr_hint: &str| -> String {
             if self.instrumental {
-                format!("<instrumental — {instr_hint}: {}>", self.instruments)
+                format!("[Instrumental: {instr_hint}]")
             } else {
                 vocal_hint.to_string()
             }
@@ -845,13 +974,65 @@ impl Composition {
         s
     }
 
-    /// The `suno generate` command a caller runs after filling the lyrics.
-    fn generate_hint(&self) -> String {
-        format!(
-            "suno generate --title \"{}\" --tags \"{}\" --lyrics-file song.txt --model v4.5-all --wait --download ./",
-            self.title,
-            self.style_prompt()
-        )
+    /// The `suno generate` argv a caller runs after filling the lyrics —
+    /// derived from actual state, so it references the real `--out` path and
+    /// every resolved control. `None` when no lyrics file was written: an
+    /// executable command must never name a file that does not exist.
+    /// `--model` is deliberately absent so the configured default applies.
+    fn generate_argv(&self) -> Option<Vec<String>> {
+        let out = self.out.as_ref()?;
+        let mut argv = vec![
+            "suno".to_string(),
+            "generate".to_string(),
+            "--title".to_string(),
+            self.title.clone(),
+            "--tags".to_string(),
+            self.style_prompt(),
+            "--lyrics-file".to_string(),
+            out.clone(),
+        ];
+        if self.instrumental {
+            argv.push("--instrumental".to_string());
+        }
+        argv.push("--wait".to_string());
+        argv.push("--download".to_string());
+        argv.push(self.download.clone());
+        Some(argv)
+    }
+
+    /// The copy-pasteable form of `generate_argv`, shell-escaped.
+    fn generate_command(&self) -> Option<String> {
+        self.generate_argv().map(|a| {
+            a.iter()
+                .map(|t| shell_quote(t))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    }
+
+    /// What still stands between this scaffold and a correct generation.
+    fn missing_requirements(&self) -> Vec<String> {
+        let mut missing = Vec::new();
+        match self.out.as_deref() {
+            None => missing.push(
+                "--out FILE: re-run with --out to write the lyrics file `generate --lyrics-file` needs".to_string(),
+            ),
+            Some(path) => {
+                let lines = placeholder_lines(&self.structure());
+                if !lines.is_empty() {
+                    missing.push(format!(
+                        "fill the {} <...> placeholder line(s) in {path} (lines {}) — `generate` rejects unresolved placeholders",
+                        lines.len(),
+                        lines
+                            .iter()
+                            .map(|n| n.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+        }
+        missing
     }
 
     /// The priming Prime-Stack Map template + research-artefact skeleton. Kept
@@ -904,6 +1085,7 @@ impl Composition {
 
     /// JSON envelope data: {title, mode, style_prompt, structure, suno_tags, ...}.
     fn to_json(&self) -> serde_json::Value {
+        let missing = self.missing_requirements();
         let mut v = serde_json::json!({
             "title": self.title,
             "mode": self.mode.as_str(),
@@ -917,7 +1099,15 @@ impl Composition {
             "theme": self.theme,
             "viral": self.viral,
             "instrumental": self.instrumental,
-            "generate": self.generate_hint(),
+            "placeholders_remaining": placeholder_lines(&self.structure()).len(),
+            "ready_to_generate": missing.is_empty(),
+            "missing_requirements": missing,
+            // Structured handoff: argv is authoritative, command is display
+            // only. Null until an --out file exists to point --lyrics-file at.
+            "next_action": self.generate_argv().map(|argv| serde_json::json!({
+                "argv": argv,
+                "command": self.generate_command(),
+            })),
         });
         if let Some(p) = self.priming.as_ref() {
             v["priming"] = serde_json::json!({
@@ -932,27 +1122,38 @@ impl Composition {
     }
 }
 
-/// A serializable wrapper for the JSON envelope with a stable `written` field.
+/// A serializable wrapper for the JSON envelope with stable `written` /
+/// `project_written` fields naming exactly what hit the disk.
 #[derive(Serialize)]
 struct WriteEnvelope {
     #[serde(flatten)]
     song: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     written: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_written: Option<String>,
+}
+
+fn write_file(path: &str, contents: &str) -> Result<(), CliError> {
+    std::fs::write(path, contents).map_err(|e| {
+        CliError::Io(std::io::Error::new(
+            e.kind(),
+            format!("cannot write '{path}': {e}"),
+        ))
+    })
 }
 
 pub fn run(args: WriteArgs, fmt: OutputFormat, quiet: bool) -> Result<(), CliError> {
-    let comp = compose(&args);
-    let plain = comp.render_plain();
+    let comp = compose(&args)?;
 
-    // --out writes the plain-text song to a file regardless of output format.
+    // --out is the generation input: the lyric block ONLY. Anything else in
+    // that file would be handed to Suno as lyrics and sung.
     if let Some(path) = args.out.as_deref() {
-        std::fs::write(path, &plain).map_err(|e| {
-            CliError::Io(std::io::Error::new(
-                e.kind(),
-                format!("cannot write '{path}': {e}"),
-            ))
-        })?;
+        write_file(path, &comp.structure())?;
+    }
+    // --project-out is the human/composite document, never a generation input.
+    if let Some(path) = args.project_out.as_deref() {
+        write_file(path, &comp.render_plain())?;
     }
 
     match fmt {
@@ -960,24 +1161,45 @@ pub fn run(args: WriteArgs, fmt: OutputFormat, quiet: bool) -> Result<(), CliErr
             let envelope = WriteEnvelope {
                 song: comp.to_json(),
                 written: args.out.clone(),
+                project_written: args.project_out.clone(),
             };
             crate::output::json::success(&envelope);
         }
         OutputFormat::Table => {
-            if let Some(path) = args.out.as_deref() {
-                if !quiet {
-                    eprintln!("Wrote song scaffold to {path}");
-                }
-            } else {
+            if args.out.is_none() && args.project_out.is_none() {
                 // Raw plain text to stdout, like `timed-lyrics --lrc`.
-                print!("{plain}");
+                print!("{}", comp.render_plain());
             }
             if !quiet {
+                if let Some(path) = args.out.as_deref() {
+                    eprintln!("Lyrics written to {path} (lyric block only — generation input)");
+                }
+                if let Some(path) = args.project_out.as_deref() {
+                    eprintln!("Project document written to {path}");
+                }
+                if args.out.is_some() {
+                    eprintln!("\nTitle:        {}", comp.title);
+                    eprintln!("Style Prompt: {}", comp.style_prompt());
+                    eprintln!("Suno Tags:    {}", comp.suno_tags());
+                }
                 eprintln!("\n## write → generate");
-                eprintln!(
-                    "Fill the <...> lyric placeholders (save the Lyrics block to song.txt), then:"
-                );
-                eprintln!("  {}", comp.generate_hint());
+                for m in comp.missing_requirements() {
+                    eprintln!("  ! {m}");
+                }
+                match comp.generate_command() {
+                    Some(cmd) => {
+                        if !comp.instrumental {
+                            eprintln!("Fill the <...> placeholders, then run:");
+                        }
+                        eprintln!("  {cmd}");
+                        eprintln!(
+                            "(uses the configured default model; add `--model v4.5-all` for a cheap draft)"
+                        );
+                    }
+                    None => eprintln!(
+                        "Re-run with `--out song.txt` to get the exact `suno generate` command."
+                    ),
+                }
                 if comp.mode == WriteMode::Priming {
                     eprintln!(
                         "Priming: complete the Prime-Stack Map with graded primes — `suno guide priming`."
@@ -1009,7 +1231,23 @@ mod tests {
             domain: None,
             subtlety: None,
             out: None,
+            project_out: None,
+            download: "./".to_string(),
         }
+    }
+
+    /// Priming args with the mode's required consent fields filled.
+    fn priming_args() -> WriteArgs {
+        let mut a = base_args();
+        a.mode = WriteMode::Priming;
+        a.target = Some("anonymised batch (n=40)".into());
+        a.objective = Some("increase recall of brand X".into());
+        a.domain = Some("marketing".into());
+        a
+    }
+
+    fn comp(args: &WriteArgs) -> Composition {
+        compose(args).expect("compose must succeed")
     }
 
     #[test]
@@ -1031,9 +1269,9 @@ mod tests {
         // compose() uses the raw string verbatim as the genre/style tag.
         let mut args = base_args();
         args.genre = Some("Balkan brass funk".to_string());
-        let comp = compose(&args);
-        assert_eq!(comp.genre_key, "Balkan brass funk");
-        assert!(comp.style_prompt().contains("Balkan brass funk"));
+        let c = comp(&args);
+        assert_eq!(c.genre_key, "Balkan brass funk");
+        assert!(c.style_prompt().contains("Balkan brass funk"));
     }
 
     #[test]
@@ -1050,8 +1288,7 @@ mod tests {
 
     #[test]
     fn songwriting_mode_has_anchors() {
-        let comp = compose(&base_args());
-        let out = comp.render_plain();
+        let out = comp(&base_args()).render_plain();
         assert!(!out.trim().is_empty());
         assert!(out.contains("Style Prompt"));
         assert!(out.contains("[Chorus]"));
@@ -1061,15 +1298,29 @@ mod tests {
     }
 
     #[test]
-    fn priming_mode_defaults_to_chill_lounge() {
+    fn out_file_content_is_the_lyric_block_only() {
+        // The invariant: --out is fed straight to `generate --lyrics-file`,
+        // so it must carry no title, no style prompt, no tag list.
         let mut args = base_args();
-        args.mode = WriteMode::Priming;
-        let comp = compose(&args);
-        let out = comp.render_plain();
+        args.genre = Some("pop".into());
+        args.title = Some("Golden Hour".into());
+        let structure = comp(&args).structure();
+        assert!(structure.contains("[Chorus]"));
+        for banned in ["Style Prompt", "Suno Tags", "Golden Hour", "---"] {
+            assert!(
+                !structure.contains(banned),
+                "lyrics file must not contain '{banned}'"
+            );
+        }
+    }
+
+    #[test]
+    fn priming_mode_defaults_to_chill_lounge() {
+        let c = comp(&priming_args());
+        let out = c.render_plain();
         assert!(out.contains("Prime-Stack"));
         assert!(out.contains("chill"));
-        assert!(out.contains("72"));
-        assert_eq!(comp.bpm, 72);
+        assert_eq!(c.bpm, 72);
         // The song scaffold is still present.
         assert!(out.contains("[Chorus]"));
         assert!(out.contains("Style Prompt"));
@@ -1077,16 +1328,59 @@ mod tests {
 
     #[test]
     fn priming_carries_flags() {
-        let mut args = base_args();
-        args.mode = WriteMode::Priming;
+        let mut args = priming_args();
         args.domain = Some("investment".into());
         args.subtlety = Some("stealth".into());
         args.target = Some("batch: seed investors".into());
-        let comp = compose(&args);
-        let out = comp.render_plain();
+        let out = comp(&args).render_plain();
         assert!(out.contains("investment"));
         assert!(out.contains("stealth"));
         assert!(out.contains("batch: seed investors"));
+    }
+
+    #[test]
+    fn priming_requires_the_consent_fields() {
+        let mut args = base_args();
+        args.mode = WriteMode::Priming;
+        let err = compose(&args).unwrap_err();
+        let msg = err.to_string();
+        for flag in ["--target", "--objective", "--domain"] {
+            assert!(msg.contains(flag), "error must name {flag}: {msg}");
+        }
+        assert_eq!(err.exit_code(), 3);
+
+        // Partially specified is still incomplete, and names only what is missing.
+        let mut args = base_args();
+        args.mode = WriteMode::Priming;
+        args.target = Some("consenting participant A".into());
+        let msg = compose(&args).unwrap_err().to_string();
+        assert!(!msg.contains("--target"));
+        assert!(msg.contains("--objective") && msg.contains("--domain"));
+    }
+
+    #[test]
+    fn priming_rejects_unknown_domain_and_subtlety() {
+        let mut args = priming_args();
+        args.domain = Some("cryptocurrency".into());
+        assert!(compose(&args).unwrap_err().to_string().contains("--domain"));
+
+        let mut args = priming_args();
+        args.subtlety = Some("sneaky".into());
+        assert!(
+            compose(&args)
+                .unwrap_err()
+                .to_string()
+                .contains("--subtlety")
+        );
+    }
+
+    #[test]
+    fn priming_objective_seeds_the_theme() {
+        let c = comp(&priming_args());
+        assert_eq!(c.theme.as_deref(), Some("increase recall of brand X"));
+        let structure = c.structure();
+        assert!(structure.contains("increase recall of brand X"));
+        assert!(!structure.contains("your theme"));
     }
 
     #[test]
@@ -1094,13 +1388,13 @@ mod tests {
         let mut args = base_args();
         args.genre = Some("pop".into());
         args.viral = true;
-        let comp = compose(&args);
-        assert!(comp.style_prompt().contains("earworm"));
-        assert!(comp.style_prompt().contains("catchy hook"));
-        let tags = comp.suno_tags();
+        let c = comp(&args);
+        assert!(c.style_prompt().contains("earworm"));
+        assert!(c.style_prompt().contains("catchy hook"));
+        let tags = c.suno_tags();
         assert!(tags.contains("singalong"));
         assert!(tags.contains("gang vocals"));
-        assert!(comp.structure().contains("[Catchy Hook]"));
+        assert!(c.structure().contains("[Catchy Hook]"));
     }
 
     #[test]
@@ -1108,22 +1402,92 @@ mod tests {
         let mut args = base_args();
         args.genre = Some("indie-rock".into());
         args.theme = Some("late nights".into());
-        let v = compose(&args).to_json();
+        let v = comp(&args).to_json();
         assert_eq!(v["mode"], "songwriting");
         assert_eq!(v["genre"], "indie-rock");
         assert!(v["style_prompt"].as_str().unwrap().contains("Indie rock"));
         assert!(v["structure"].as_str().unwrap().contains("[Chorus]"));
         assert!(!v["suno_tags"].as_str().unwrap().is_empty());
-        assert!(v["generate"].as_str().unwrap().contains("suno generate"));
         assert_eq!(v["title"], "Late Nights");
+        // No --out: no file exists, so no runnable command may be advertised.
+        assert!(v["next_action"].is_null());
+        assert_eq!(v["ready_to_generate"], false);
+        assert!(
+            v["missing_requirements"][0]
+                .as_str()
+                .unwrap()
+                .contains("--out")
+        );
+    }
+
+    #[test]
+    fn next_action_references_the_real_out_path_and_escapes_values() {
+        let mut args = base_args();
+        args.genre = Some("pop".into());
+        args.out = Some("/tmp/deep dir/out-song.txt".into());
+        args.title = Some(r#"She Said "Go""#.into());
+        args.download = "./songs/".into();
+        let c = comp(&args);
+        let argv = c.generate_argv().expect("an --out file means a command");
+        // argv is the authoritative contract: values are unescaped and exact.
+        let lf = argv.iter().position(|a| a == "--lyrics-file").unwrap();
+        assert_eq!(argv[lf + 1], "/tmp/deep dir/out-song.txt");
+        let ti = argv.iter().position(|a| a == "--title").unwrap();
+        assert_eq!(argv[ti + 1], r#"She Said "Go""#);
+        let dl = argv.iter().position(|a| a == "--download").unwrap();
+        assert_eq!(argv[dl + 1], "./songs/");
+        // The display string is shell-safe and never hardcodes song.txt.
+        let cmd = c.generate_command().unwrap();
+        assert!(cmd.contains(r#"'She Said "Go"'"#), "{cmd}");
+        assert!(cmd.contains("'/tmp/deep dir/out-song.txt'"), "{cmd}");
+        assert!(!cmd.contains(" song.txt"));
+        // No pinned model: the configured default applies.
+        assert!(!cmd.contains("--model"));
+    }
+
+    #[test]
+    fn shell_quote_handles_quotes_and_spaces() {
+        assert_eq!(shell_quote("plain-value_1.txt"), "plain-value_1.txt");
+        assert_eq!(shell_quote("two words"), "'two words'");
+        assert_eq!(shell_quote(r#"She Said "Go""#), r#"'She Said "Go"'"#);
+        assert_eq!(shell_quote("Rock 'n' Roll"), r"'Rock '\''n'\'' Roll'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn placeholder_lines_finds_scaffold_spans() {
+        assert_eq!(
+            placeholder_lines(
+                "[Verse]
+<4-6 lines>
+real line
+"
+            ),
+            [2]
+        );
+        // A lone angle bracket is not a placeholder.
+        assert!(
+            placeholder_lines(
+                "5 < 6 is true
+"
+            )
+            .is_empty()
+        );
+        assert!(
+            placeholder_lines(
+                "[Chorus]
+we rise
+"
+            )
+            .is_empty()
+        );
+        // A fresh vocal scaffold always has some.
+        assert!(!placeholder_lines(&comp(&base_args()).structure()).is_empty());
     }
 
     #[test]
     fn priming_json_has_priming_block() {
-        let mut args = base_args();
-        args.mode = WriteMode::Priming;
-        args.domain = Some("marketing".into());
-        let v = compose(&args).to_json();
+        let v = comp(&priming_args()).to_json();
         assert_eq!(v["mode"], "priming");
         assert_eq!(v["priming"]["domain"], "marketing");
         assert!(
@@ -1132,6 +1496,8 @@ mod tests {
                 .unwrap()
                 .contains("Prime-Stack Map")
         );
+        // The artefact belongs in the envelope, never in the lyrics file.
+        assert!(!v["structure"].as_str().unwrap().contains("Prime-Stack"));
     }
 
     #[test]
@@ -1139,24 +1505,42 @@ mod tests {
         let mut args = base_args();
         args.genre = Some("modern-pop".into()); // default female
         args.vocal = Some(VocalGender::Male);
-        let comp = compose(&args);
-        assert_eq!(comp.gender, Some(Gender::Male));
-        assert!(comp.vocal.contains("male"));
-        assert!(!comp.vocal.contains("female"));
-        assert!(comp.structure().contains("[Male Vocal]"));
+        let c = comp(&args);
+        assert_eq!(c.gender, Some(Gender::Male));
+        assert!(c.vocal.contains("male"));
+        assert!(!c.vocal.contains("female"));
+        assert!(c.structure().contains("[Male Vocal]"));
+        // And the tag list agrees with the style prompt.
+        assert!(c.suno_tags().contains("male vocals"));
+        assert!(!c.suno_tags().contains("female vocals"));
     }
 
     #[test]
-    fn instrumental_drops_vocals() {
+    fn instrumental_is_coherent_end_to_end() {
         let mut args = base_args();
         args.genre = Some("lo-fi".into());
         args.instrumental = true;
-        let comp = compose(&args);
-        assert!(comp.style_prompt().contains("instrumental"));
-        let structure = comp.structure();
+        args.viral = true;
+        args.out = Some("beat.txt".into());
+        let c = comp(&args);
+        assert!(c.style_prompt().contains("instrumental"));
+        let structure = c.structure();
         assert!(structure.contains("[Instrumental]"));
         assert!(!structure.contains("[Vocal Style"));
-        assert!(comp.suno_tags().contains("instrumental"));
+        // No fill-me instructions in a song with nothing to fill.
+        assert!(
+            placeholder_lines(&structure).is_empty(),
+            "instrumental scaffold must be final, not a template:\n{structure}"
+        );
+        let tags = c.suno_tags();
+        assert!(tags.contains("instrumental"));
+        assert!(!tags.contains("vocal"));
+        // The handoff must carry --instrumental, and nothing blocks generation.
+        let argv = c.generate_argv().unwrap();
+        assert!(argv.iter().any(|a| a == "--instrumental"));
+        assert!(argv.iter().any(|a| a == "--lyrics-file"));
+        assert!(c.missing_requirements().is_empty());
+        assert_eq!(c.to_json()["ready_to_generate"], true);
     }
 
     #[test]
@@ -1164,7 +1548,7 @@ mod tests {
         // The embedded vocabulary must include every tag the skeleton emits.
         let mut args = base_args();
         args.viral = true;
-        let structure = compose(&args).structure();
+        let structure = comp(&args).structure();
         for tag in [
             "[Intro]",
             "[Chorus]",
@@ -1181,14 +1565,28 @@ mod tests {
     }
 
     #[test]
-    fn bpm_and_mood_overrides_apply() {
+    fn overrides_propagate_to_every_field() {
         let mut args = base_args();
-        args.genre = Some("jazz".into());
+        args.genre = Some("modern-pop".into()); // Uplifting, 120 BPM, female
         args.bpm = Some(88);
-        args.mood = Some("brooding and noir".into());
-        let comp = compose(&args);
-        let sp = comp.style_prompt();
+        args.mood = Some("dark and brooding".into());
+        args.vocal = Some(VocalGender::Male);
+        let c = comp(&args);
+
+        let sp = c.style_prompt();
         assert!(sp.contains("88 BPM"));
-        assert!(sp.contains("brooding and noir"));
+        assert!(sp.contains("dark and brooding"));
+
+        // The meta-tags must not contradict the style prompt.
+        let structure = c.structure();
+        assert!(structure.contains("[Mood: Dark]"), "{structure}");
+        assert!(!structure.contains("Uplifting"), "{structure}");
+        assert!(structure.contains("[Male Vocal]"));
+
+        // Nor may the tag list.
+        let tags = c.suno_tags();
+        assert!(tags.contains("dark"));
+        assert!(!tags.contains("uplifting"));
+        assert!(tags.contains("88 BPM"));
     }
 }

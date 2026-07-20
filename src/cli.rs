@@ -2,17 +2,25 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 // Agents read --help to bootstrap usage; keep tips short and examples real.
 const HELP_FOOTER: &str = "\
+Which creation command:
+  write     Compose the song — style prompt + lyric skeleton you fill (free)
+  generate  Render audio from lyrics you already have (costs credits)
+  describe  Render audio from a one-line description; Suno writes the lyrics
+  lyrics    Lyrics text only, no audio (free)
+
 Tips:
   • First run: `suno auth --login`, then `suno doctor` to verify the setup
   • Output is a JSON envelope automatically when piped; force with --json
-  • `suno lyrics` is free; generation costs ~70 credits per call on v5.5
+  • `suno write` and `suno lyrics` are free; generation costs ~70 credits per call on v5.5
   • Exit codes: 0 ok, 1 transient (retry), 2 config/auth, 3 bad input, 4 rate limited
   • Config: `suno config path` shows the file; SUNO_* env vars override it
   • Full machine-readable manifest: `suno agent-info | jq`
 
 Examples:
-  suno generate --title \"Weekend Code\" --tags \"indie rock, upbeat\" --lyrics-file lyrics.txt --wait --download ./songs/
-    Generate a song and download the finished MP3 (lyrics embedded)
+  suno write --genre \"indie rock\" --theme \"late-night city drives\" --vocal male --out song.txt
+  # fill the <...> lyric slots in song.txt, then run the generate command `write` printed:
+  suno generate --title \"Night Drive\" --tags \"Indie rock, ...\" --lyrics-file song.txt --wait --download ./songs/
+    The full flow: compose, fill, render, download (lyrics embedded in the MP3)
 
   suno describe --prompt \"a chill lo-fi track about rainy mornings\" --wait --download ./
     Let Suno write the lyrics from a description
@@ -30,7 +38,7 @@ Examples:
 #[command(
     name = "suno",
     version,
-    about = "Suno AI music generation CLI — v5.5 support",
+    about = "Write, generate, and manage Suno music — v5.5 support",
     after_long_help = HELP_FOOTER
 )]
 pub struct Cli {
@@ -46,8 +54,13 @@ pub struct Cli {
     pub quiet: bool,
 }
 
+// Command order drives `--help` order: the creation commands lead, composer
+// first, because `write` is where a song starts.
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Compose a Suno-ready structured song (the native song generator)
+    Write(WriteArgs),
+
     /// Generate music with custom lyrics, tags, and controls
     Generate(GenerateArgs),
 
@@ -123,9 +136,6 @@ pub enum Commands {
     /// Machine-readable capabilities (for AI agents)
     AgentInfo,
 
-    /// Compose a Suno-ready structured song (the native song generator)
-    Write(WriteArgs),
-
     /// Read built-in songwriting guides (list all, or print one)
     #[command(visible_alias = "guides")]
     Guide(GuideArgs),
@@ -168,23 +178,29 @@ pub struct GuideArgs {
 // `suno write` help. Agents read --help to learn the command; keep it concrete.
 const WRITE_HELP: &str = "\
 Tips:
+  • --out FILE is the way to get an editable lyrics file: it holds the lyric block ONLY,
+    so it feeds `suno generate --lyrics-file` directly. Title/style/tags go to stderr and JSON
+  • Shell redirection (`suno write > song.txt`) receives the JSON envelope, not lyrics —
+    output is a JSON envelope whenever stdout is not a terminal. Use --out for the lyrics
+  • --project-out FILE writes the full human document (title + style prompt + tags + artefact)
+  • Fill the <...> placeholders before generating; `suno generate` rejects unresolved ones
   • Genres are fuzzy/case-insensitive; an unknown genre becomes a raw style tag (never fails)
-  • Output is a scaffold: fill the <...> lyric placeholders, then run `suno generate --lyrics-file`
-  • --viral adds earworm/hook meta-tags; --instrumental drops all vocals + lyric slots
-  • --mode priming sets a chill-lounge scaffold + Prime-Stack Map (see `suno guide priming`)
-  • Plain text to stdout (JSON envelope with --json); --out writes the song to a file
+  • --viral adds earworm/hook meta-tags; --instrumental drops all vocals and lyric slots and
+    emits a generate command with --instrumental
+  • --mode priming requires --target, --objective and --domain (see `suno guide priming`)
 
 Examples:
-  suno write --theme \"late-night coding\" --genre indie-rock --vocal male
-    Compose an indie-rock scaffold; fill the lyric slots, then generate
+  suno write --theme \"late-night coding\" --genre indie-rock --vocal male --out song.txt
+    Scaffold to song.txt; fill the <...> slots, then run the printed generate command
 
-  suno write --theme \"summer love\" --genre pop --viral --title \"Golden Hour\"
+  suno write --theme \"summer love\" --genre pop --viral --title \"Golden Hour\" --out song.txt
     A pop song with earworm hook tags baked into the style prompt
 
   suno write --genre lo-fi --instrumental --out beat.txt
-    Instrumental lo-fi scaffold written to a file
+    Instrumental lo-fi scaffold — no lyric slots, generatable as written
 
-  suno write --mode priming --domain investment --subtlety medium --target \"batch: seed investors\"
+  suno write --mode priming --domain investment --target \"batch: seed investors\" \\
+      --objective \"increase recall of fund X\" --subtlety medium --out song.txt
     Priming research scaffold (chill lounge, 72 BPM) with a Prime-Stack Map template";
 
 #[derive(clap::Args)]
@@ -242,9 +258,18 @@ pub struct WriteArgs {
     #[arg(long)]
     pub subtlety: Option<String>,
 
-    /// Write the song to a file instead of stdout
+    /// Write the lyric block to FILE — the file `generate --lyrics-file` reads
     #[arg(long)]
     pub out: Option<String>,
+
+    /// Also write the full project document (title, style prompt, tags,
+    /// priming artefact) to FILE. Never a generation input.
+    #[arg(long)]
+    pub project_out: Option<String>,
+
+    /// Download directory baked into the emitted `suno generate` command
+    #[arg(long, default_value = "./")]
+    pub download: String,
 }
 
 /// Composition modes. Extensible: add a variant here and one match arm in
@@ -328,7 +353,7 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub instrumental: bool,
 
-    /// Bypass the duplicate-run guard
+    /// Bypass the duplicate-run guard and the unresolved-placeholder preflight
     #[arg(long)]
     pub force: bool,
 
