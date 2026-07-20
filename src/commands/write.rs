@@ -1193,7 +1193,7 @@ pub fn run(args: WriteArgs, fmt: OutputFormat, quiet: bool) -> Result<(), CliErr
                         }
                         eprintln!("  {cmd}");
                         eprintln!(
-                            "(uses the configured default model; add `--model v4.5-all` for a cheap draft)"
+                            "(renders on the configured default model — v5.5, Suno's latest, unless you override --model)"
                         );
                     }
                     None => eprintln!(

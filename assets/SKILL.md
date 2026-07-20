@@ -19,7 +19,7 @@ One binary does the whole job — composing the song and rendering the audio. Al
    ```bash
    suno generate --title "..." --tags "<style_prompt>" --lyrics-file song.txt --wait --download ./songs/
    ```
-   `generate` exits 3 if any `<...>` placeholder survives, so an unfilled scaffold can never burn credits. It uses the configured default model; add `--model v4.5-all` for a ~10-credit draft.
+   `generate` exits 3 if any `<...>` placeholder survives, so an unfilled scaffold can never burn credits. It renders on the configured default model — v5.5, Suno's latest (~70 credits) — unless you pass `--model`.
 
 ## Priming / research songs
 

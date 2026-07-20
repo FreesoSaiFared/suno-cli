@@ -125,7 +125,7 @@ suno generate --title "..." --tags "..." --lyrics-file song.txt --wait --downloa
 
 Note that shell redirection (`suno write > song.txt`) receives the JSON envelope, not lyrics: output is a JSON envelope whenever stdout is not a terminal. `--out` is the way to get an editable lyrics file.
 
-Fuzzy genre matching covers ~24 subgenres; an unknown genre is passed through verbatim as a style tag, so `write` never fails on input. Piped or with `--json` you get a `{title, mode, genre, style_prompt, structure, suno_tags, structure_tags, bpm, vocal, theme, viral, instrumental, placeholders_remaining, ready_to_generate, missing_requirements, next_action, written}` envelope. `next_action.argv` is the authoritative handoff — run it as argv, never shell-parse `next_action.command`. It is `null` until `--out` names a real file, and the emitted command omits `--model` so your configured default applies (add `--model v4.5-all` for a ~10-credit draft).
+Fuzzy genre matching covers ~24 subgenres; an unknown genre is passed through verbatim as a style tag, so `write` never fails on input. Piped or with `--json` you get a `{title, mode, genre, style_prompt, structure, suno_tags, structure_tags, bpm, vocal, theme, viral, instrumental, placeholders_remaining, ready_to_generate, missing_requirements, next_action, written}` envelope. `next_action.argv` is the authoritative handoff — run it as argv, never shell-parse `next_action.command`. It is `null` until `--out` names a real file, and the emitted command omits `--model` so your configured default applies (v5.5, Suno's latest, out of the box).
 
 ### Priming / research songs
 
@@ -279,7 +279,7 @@ Auth methods (in order of convenience):
 
 ### Captcha Preflight
 
-Before every generate/describe/extend/cover/remaster, the CLI asks Suno whether this account is captcha-gated (`POST /api/c/check`). Most accounts are above the trust threshold, so the Chrome-piloting hCaptcha solver is skipped entirely (`Captcha not required — skipping solver` on stderr). When a captcha IS required, the solver runs automatically; `--token` supplies a pre-solved response instead, and `--no-captcha` disables solving outright. If a challenge keeps failing, generate one song in the suno.com UI to clear it, then retry.
+Before every generate/describe/extend/cover/remaster, the CLI asks Suno whether this account is captcha-gated (`POST /api/c/check`). Most accounts are above the trust threshold, so the Chrome-piloting hCaptcha solver is skipped entirely (`Captcha not required — skipping solver` on stderr). When a captcha IS required, the solver pilots a **headless** Chrome (no window, no Dock icon); if hCaptcha rejects the headless fingerprint, it transparently retries once in a headed instance parked offscreen. Either way the Chrome is killed when the CLI exits — nothing lingers. `SUNO_CAPTCHA_HEADLESS=1` / `SUNO_CAPTCHA_HEADED=1` pin a mode; `--token` supplies a pre-solved response instead, and `--no-captcha` disables solving outright. If a challenge keeps failing, generate one song in the suno.com UI to clear it, then retry.
 
 ### Voice Personas
 
@@ -379,7 +379,7 @@ resolved location.
 
 ```bash
 suno config show                        # effective merged config
-suno config set default_model v4.5-all  # persist a value
+suno config set default_model v5.5      # persist a value (v5.5 is already the default)
 suno config check                       # validate the file
 ```
 

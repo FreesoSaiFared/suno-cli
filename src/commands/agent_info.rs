@@ -177,7 +177,7 @@ fn command_map() -> serde_json::Map<String, Value> {
                 "workflow": [
                     "suno write --genre <g> --theme <t> --out song.txt --json",
                     "edit song.txt: replace every <...> span; keep [Section] tags; repeat the chorus verbatim",
-                    "run data.next_action.argv (add --model v4.5-all for a ~10-credit draft)",
+                    "run data.next_action.argv — renders on the configured default model (v5.5, Suno's latest; ~70 credits)",
                     "`generate` exits 3 if any <...> placeholder survives, so no credits are burned on a scaffold"
                 ],
                 "raw_output": "human mode without --out: composite plain text on stdout (Title / Style Prompt / Lyrics skeleton / Suno Tags), handoff on stderr. With --out: nothing on stdout, the file holds lyrics only. JSON envelope when piped or --json"
