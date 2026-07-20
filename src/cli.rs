@@ -594,6 +594,10 @@ pub struct DeleteArgs {
     /// Skip confirmation
     #[arg(short = 'y', long)]
     pub yes: bool,
+
+    /// Restore the clip(s) from trash instead of trashing them
+    #[arg(long)]
+    pub restore: bool,
 }
 
 #[derive(clap::Args)]

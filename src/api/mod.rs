@@ -260,6 +260,9 @@ fn classify_404(path: &str) -> CliError {
         "/api/generate/concat/v2/",
         "/api/generate/lyrics/",
         "/api/feed/v3",
+        // trash carries its clip ids in the BODY, so a 404 here is always the
+        // route moving out from under us (it did: feed/trash → gen/trash).
+        "/api/gen/trash",
     ];
     if ROUTE_LEVEL.contains(&path) {
         return CliError::Api {
@@ -286,6 +289,7 @@ mod tests {
             "/api/c/check",
             "/api/generate/v2-web/",
             "/api/feed/v3",
+            "/api/gen/trash",
         ] {
             assert!(
                 matches!(
@@ -307,7 +311,6 @@ mod tests {
         for path in [
             "/api/feed/",
             "/api/gen/abc-123/set_visibility/",
-            "/api/feed/trash",
             "/api/edit/stems/abc-123",
         ] {
             assert!(

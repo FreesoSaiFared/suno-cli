@@ -191,7 +191,7 @@ suno models          List available models with limits
 
 ```
 suno download <ids>  Download audio/video with embedded lyrics
-suno delete <ids>    Delete/trash clips
+suno delete <ids>    Move clips to trash (-y to confirm; --restore undoes it)
 suno set <id>        Update title, lyrics, caption, or remove cover
 suno publish <ids>   Toggle public/private visibility
 suno timed-lyrics    Get word-level timestamped lyrics (--lrc for LRC format)

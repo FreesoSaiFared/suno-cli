@@ -774,20 +774,31 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             }
             // No interactive confirmation and no sleep-then-proceed: agents
             // can't answer prompts, and a timed auto-proceed deletes data the
-            // caller never confirmed. Explicit -y or nothing.
-            if !args.yes {
+            // caller never confirmed. Explicit -y or nothing. Restoring is
+            // non-destructive (it undoes a trash), so it needs no -y.
+            if !args.yes && !args.restore {
                 return Err(CliError::InvalidInput(format!(
                     "delete requires -y to confirm — re-run: suno delete {} -y",
                     args.ids.join(" ")
                 )));
             }
-            client().await?.delete_clips(&args.ids).await?;
+            client()
+                .await?
+                .set_trashed(&args.ids, !args.restore)
+                .await?;
+            let verb = if args.restore { "restored" } else { "deleted" };
             match fmt {
                 OutputFormat::Json => output::json::success(serde_json::json!({
-                    "deleted": args.ids.len(),
+                    verb: args.ids.len(),
                     "ids": args.ids,
                 })),
-                OutputFormat::Table => eprintln!("Deleted {} clip(s)", args.ids.len()),
+                OutputFormat::Table => {
+                    if args.restore {
+                        eprintln!("Restored {} clip(s) from trash", args.ids.len());
+                    } else {
+                        eprintln!("Deleted {} clip(s)", args.ids.len());
+                    }
+                }
             }
         }
 

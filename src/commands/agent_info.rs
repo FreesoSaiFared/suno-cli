@@ -303,11 +303,12 @@ fn command_map() -> serde_json::Map<String, Value> {
         (
             "delete",
             json!({
-                "description": "Delete/trash clip(s); requires -y (no interactive confirmation)",
+                "description": "Move clip(s) to trash (recoverable); --restore undoes it. Trashing requires -y (no interactive confirmation)",
                 "aliases": ["rm"],
                 "args": [ids_arg],
                 "options": [
-                    {"name": "--yes", "type": "bool", "required": true, "default": false, "description": "Confirm deletion (-y)"}
+                    {"name": "--yes", "type": "bool", "required": false, "default": false, "description": "Confirm trashing (-y); required unless --restore"},
+                    {"name": "--restore", "type": "bool", "required": false, "default": false, "description": "Restore the clip(s) from trash instead of trashing (no -y needed)"}
                 ]
             }),
         ),
