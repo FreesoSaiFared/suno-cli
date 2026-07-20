@@ -1539,7 +1539,9 @@ we rise
         // --theme) must flag every line it touches — the same-line-only check
         // let these through and the fragments got sung.
         assert_eq!(
-            placeholder_lines("[Verse 1]\n<4-6 lines — set the scene: road trip\nwith old friends>\nreal line\n"),
+            placeholder_lines(
+                "[Verse 1]\n<4-6 lines — set the scene: road trip\nwith old friends>\nreal line\n"
+            ),
             [2, 3]
         );
         // A `<` that never closes anywhere stays literal text.
