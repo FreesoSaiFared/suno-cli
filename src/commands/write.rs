@@ -6,12 +6,14 @@
 //! `assets/guides/songwriting.md`. The agent fills the `<...>` lyric
 //! placeholders, then runs `suno generate --lyrics-file`.
 //!
-//! Load-bearing invariant: the file named by the emitted generate command must
-//! exist, be directly consumable by `--lyrics-file`, carry no metadata that
-//! would be sung, and reflect every resolved control. `--out` therefore writes
-//! the lyric block ONLY; the composite human document (title, style prompt,
-//! tags, priming artefact) goes to `--project-out`, the JSON envelope, or
-//! stderr.
+//! Load-bearing invariant: anything `write` hands over as generation input
+//! must be directly consumable by `--lyrics-file` and carry no metadata that
+//! would be sung. `--out` therefore writes the lyric block ONLY, and bare
+//! table-mode stdout prints that same lyric block — stdout is always safe to
+//! redirect or copy into a lyrics field. The composite human document (title,
+//! style prompt, tags, priming artefact) goes to `--project-out`, the JSON
+//! envelope, or stderr — never to stdout, and never to the same path as
+//! `--out` (that collision is rejected).
 //!
 //! Modes are extensible: add a `WriteMode` variant in `cli.rs` and a branch in
 //! `render_plain` / `compose` here — everything else derives from the registry.
@@ -564,17 +566,41 @@ fn contrast_mood(mood_tag: &str) -> &'static str {
 }
 
 /// 1-based line numbers holding an unresolved scaffold placeholder — an
-/// angle-bracket instruction span (`<...>`) opened and closed on one line.
-/// Shared with `suno generate`'s preflight so a scaffold can never be sung.
+/// angle-bracket instruction span (`<...>`). A span may open and close on one
+/// line or stretch across several (a newline inside `--theme`, an editor's
+/// hard wrap), and every line it touches is flagged — a same-line-only check
+/// let split spans sail through the preflight and get sung. A `<` that never
+/// closes anywhere is literal text, not a placeholder. Shared with the
+/// `generate` and `extend` preflights so a scaffold can never be sung.
 pub fn placeholder_lines(text: &str) -> Vec<usize> {
-    text.lines()
-        .enumerate()
-        .filter(|(_, l)| match l.find('<') {
-            Some(open) => l[open + 1..].contains('>'),
-            None => false,
-        })
-        .map(|(i, _)| i + 1)
-        .collect()
+    let mut flagged: Vec<usize> = Vec::new();
+    // Lines touched by the currently-open span; committed only when the span
+    // actually closes, so a stray unclosed `<` flags nothing.
+    let mut pending: Vec<usize> = Vec::new();
+    let mut in_span = false;
+    for (i, line) in text.lines().enumerate() {
+        let line_no = i + 1;
+        if in_span {
+            pending.push(line_no);
+        }
+        for ch in line.chars() {
+            match ch {
+                '<' if !in_span => {
+                    in_span = true;
+                    if pending.last() != Some(&line_no) {
+                        pending.push(line_no);
+                    }
+                }
+                '>' if in_span => {
+                    in_span = false;
+                    flagged.append(&mut pending);
+                }
+                _ => {}
+            }
+        }
+    }
+    flagged.dedup();
+    flagged
 }
 
 /// POSIX single-quote escaping for the display command. Bare-safe tokens stay
@@ -771,10 +797,15 @@ fn compose(args: &WriteArgs) -> Result<Composition, CliError> {
 
     // The priming objective doubles as the song theme so the skeleton stops
     // saying "your theme" for a request that already stated its subject.
+    // Collapse all whitespace to single spaces: the theme is interpolated
+    // inside single-line `<...>` placeholder spans, and a newline in it would
+    // split a span across lines and defeat the placeholder preflight.
     let theme = args
         .theme
         .clone()
-        .or_else(|| priming.as_ref().map(|p| p.objective.clone()));
+        .or_else(|| priming.as_ref().map(|p| p.objective.clone()))
+        .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|t| !t.is_empty());
 
     let title = args
         .title
@@ -1146,6 +1177,21 @@ fn write_file(path: &str, contents: &str) -> Result<(), CliError> {
 pub fn run(args: WriteArgs, fmt: OutputFormat, quiet: bool) -> Result<(), CliError> {
     let comp = compose(&args)?;
 
+    // The two outputs must never collide: --project-out written second would
+    // silently overwrite the lyric file while the envelope still certifies it
+    // as generation input — the composite would then be sung.
+    if let (Some(o), Some(p)) = (args.out.as_deref(), args.project_out.as_deref()) {
+        let same = match (std::path::absolute(o), std::path::absolute(p)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => o == p,
+        };
+        if same {
+            return Err(CliError::InvalidInput(
+                "--out and --project-out must be different files — --out is the generation input (lyrics only), --project-out is the never-sung project document".into(),
+            ));
+        }
+    }
+
     // --out is the generation input: the lyric block ONLY. Anything else in
     // that file would be handed to Suno as lyrics and sung.
     if let Some(path) = args.out.as_deref() {
@@ -1167,8 +1213,12 @@ pub fn run(args: WriteArgs, fmt: OutputFormat, quiet: bool) -> Result<(), CliErr
         }
         OutputFormat::Table => {
             if args.out.is_none() && args.project_out.is_none() {
-                // Raw plain text to stdout, like `timed-lyrics --lrc`.
-                print!("{}", comp.render_plain());
+                // Stdout mirrors the --out contract: the lyric block ONLY, so
+                // whatever lands there (redirected, copy-pasted into a lyrics
+                // field) is always a valid generation input. The framing —
+                // title, style prompt, tags — goes to stderr below; the full
+                // composite document is --project-out's job.
+                print!("{}", comp.structure());
             }
             if !quiet {
                 if let Some(path) = args.out.as_deref() {
@@ -1177,11 +1227,9 @@ pub fn run(args: WriteArgs, fmt: OutputFormat, quiet: bool) -> Result<(), CliErr
                 if let Some(path) = args.project_out.as_deref() {
                     eprintln!("Project document written to {path}");
                 }
-                if args.out.is_some() {
-                    eprintln!("\nTitle:        {}", comp.title);
-                    eprintln!("Style Prompt: {}", comp.style_prompt());
-                    eprintln!("Suno Tags:    {}", comp.suno_tags());
-                }
+                eprintln!("\nTitle:        {}", comp.title);
+                eprintln!("Style Prompt: {}", comp.style_prompt());
+                eprintln!("Suno Tags:    {}", comp.suno_tags());
                 eprintln!("\n## write → generate");
                 for m in comp.missing_requirements() {
                     eprintln!("  ! {m}");
@@ -1483,6 +1531,52 @@ we rise
         );
         // A fresh vocal scaffold always has some.
         assert!(!placeholder_lines(&comp(&base_args()).structure()).is_empty());
+    }
+
+    #[test]
+    fn placeholder_lines_flags_spans_split_across_lines() {
+        // A span rewrapped by an editor (or born split from a newline in
+        // --theme) must flag every line it touches — the same-line-only check
+        // let these through and the fragments got sung.
+        assert_eq!(
+            placeholder_lines("[Verse 1]\n<4-6 lines — set the scene: road trip\nwith old friends>\nreal line\n"),
+            [2, 3]
+        );
+        // A `<` that never closes anywhere stays literal text.
+        assert!(placeholder_lines("5 < 6 is true\nand 2 + 2 = 4\n").is_empty());
+        // Close-then-open on one line: both spans, no double-count.
+        assert_eq!(placeholder_lines("<a>\n<b\nc>\n"), [1, 2, 3]);
+    }
+
+    #[test]
+    fn theme_whitespace_collapses_so_spans_stay_single_line() {
+        let mut args = base_args();
+        args.theme = Some("invest in the fund\nfeel confident about Q3".into());
+        let structure = comp(&args).structure();
+        assert!(structure.contains("invest in the fund feel confident about Q3"));
+        // Every placeholder span in a fresh scaffold opens and closes on one
+        // line, so the preflight's line numbers name all of them.
+        for line in structure.lines() {
+            assert_eq!(
+                line.contains('<'),
+                line.contains('>'),
+                "split placeholder span in scaffold line: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn out_and_project_out_must_be_different_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("song.txt");
+        let mut args = base_args();
+        args.genre = Some("pop".into());
+        args.out = Some(path.display().to_string());
+        args.project_out = Some(path.display().to_string());
+        let err = run(args, OutputFormat::Json, true).unwrap_err();
+        assert!(matches!(err, CliError::InvalidInput(_)));
+        // Nothing was written — the collision is rejected before any I/O.
+        assert!(!path.exists());
     }
 
     #[test]

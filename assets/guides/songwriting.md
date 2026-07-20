@@ -18,46 +18,48 @@ The song you write here is plain text that pastes straight into Suno or feeds th
 
 ## Output format
 
-Plain text only. NEVER use markdown formatting in the song itself — no `**`, no `#`, no backticks. The output must copy-paste directly into Suno.
+Plain text only. NEVER use markdown formatting in the song itself — no `**`, no `#`, no backticks. Each block below maps to its own Suno field (or CLI flag — see **Generate it**); only the lyric block between the `---` separators is ever pasted into a lyrics box or saved for `--lyrics-file`.
+
+Every `<...>` span is an instruction to you, never lyric text — replace all of them. This is the same placeholder convention `suno write` scaffolds use, and the CLI's preflight refuses to generate while any `<...>` span survives, so an unfilled template cannot burn credits. (Do not invent other placeholder markers like curly braces: the guard only scans for `<...>`.)
 
 ```
-{Title}
+<Title>
 
 Style Prompt
-{genre}, {mood}, {tempo} BPM, {vocal type}, {instruments}
+<genre>, <mood>, <tempo> BPM, <vocal type>, <instruments>
 
 ---
 
 Lyrics
 
-[Intro] [Mood: {mood}] [Energy: {level}]
-[Instrument: {instruments}]
-[Vocal Style: {style}]
+[Intro] [Mood: <mood>] [Energy: <level>]
+[Instrument: <instruments>]
+[Vocal Style: <style>]
 
 [Verse 1]
-{4-6 lines, 6-10 syllables each}
+<4-6 lines, 6-10 syllables each>
 
 [Pre-Chorus]
-{2-4 lines}
+<2-4 lines>
 
 [Chorus] [Energy: High]
-{4-6 lines, memorable hook}
+<4-6 lines, memorable hook>
 
 [Verse 2]
-{4-6 lines}
+<4-6 lines>
 
-[Bridge] [Mood: {contrast}]
-{2-4 lines}
+[Bridge] [Mood: <contrast>]
+<2-4 lines>
 
 [Chorus] [Energy: High]
-{repeat verbatim}
+<repeat the first chorus verbatim>
 
 [Outro] [Fade Out]
 
 ---
 
 Suno Tags
-{comma-separated list}
+<comma-separated list>
 ```
 
 ## Rules

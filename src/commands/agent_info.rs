@@ -71,6 +71,13 @@ fn command_map() -> serde_json::Map<String, Value> {
         "name": "--force", "type": "bool", "required": false, "default": false,
         "description": "Bypass the duplicate-run guard"
     });
+    // generate/extend accept lyrics, so their --force ALSO disarms the
+    // unresolved-placeholder preflight — the manifest must say so, or an agent
+    // habituated to --force for lock contention unknowingly sends scaffolds.
+    let scaffold_force_option = json!({
+        "name": "--force", "type": "bool", "required": false, "default": false,
+        "description": "Bypass the duplicate-run guard AND the unresolved-<...>-placeholder preflight — pass only after confirming the lyrics are final"
+    });
     let clip_id_arg = json!({
         "name": "clip_id", "kind": "positional", "type": "string", "required": true,
         "description": "Clip ID"
@@ -99,7 +106,7 @@ fn command_map() -> serde_json::Map<String, Value> {
                     {"name": "--audio-influence", "type": "number", "required": false, "description": "0-100"},
                     {"name": "--instrumental", "type": "bool", "required": false, "default": false, "description": "No vocals"},
                     {"name": "--persona", "type": "string", "required": false, "description": "Voice persona UUID"},
-                    wait_option, download_option, token_option, no_captcha_option, force_option
+                    wait_option, download_option, token_option, no_captcha_option, scaffold_force_option
                 ]
             }),
         ),
@@ -151,7 +158,7 @@ fn command_map() -> serde_json::Map<String, Value> {
                     {"name": "--domain", "type": "string", "required": false, "values": ["investment", "marketing", "sales", "political", "health", "other"], "description": "[priming] REQUIRED. Domain of the objective"},
                     {"name": "--subtlety", "type": "string", "required": false, "default": "medium", "values": ["stealth", "medium", "overt"], "description": "[priming] Subtlety dial"},
                     {"name": "--out", "type": "string", "required": false, "description": "Write the lyric block ONLY to FILE — the file `generate --lyrics-file` reads. No headers, tags or metadata"},
-                    {"name": "--project-out", "type": "string", "required": false, "description": "Also write the composite human document (title + style prompt + lyrics + tags + priming artefact). Never a generation input"},
+                    {"name": "--project-out", "type": "string", "required": false, "description": "Also write the composite human document (title + style prompt + lyrics + tags + priming artefact). Never a generation input; must differ from --out (same path → exit 3)"},
                     {"name": "--download", "type": "string", "required": false, "default": "./", "description": "Download directory baked into the emitted generate command"}
                 ],
                 "required_fields_by_mode": {
@@ -178,9 +185,9 @@ fn command_map() -> serde_json::Map<String, Value> {
                     "suno write --genre <g> --theme <t> --out song.txt --json",
                     "edit song.txt: replace every <...> span; keep [Section] tags; repeat the chorus verbatim",
                     "run data.next_action.argv — renders on the configured default model (v5.5, Suno's latest; ~70 credits)",
-                    "`generate` exits 3 if any <...> placeholder survives, so no credits are burned on a scaffold"
+                    "`generate` and `extend` exit 3 if any <...> placeholder survives (unless --force, which disarms that preflight), so no credits are burned on a scaffold"
                 ],
-                "raw_output": "human mode without --out: composite plain text on stdout (Title / Style Prompt / Lyrics skeleton / Suno Tags), handoff on stderr. With --out: nothing on stdout, the file holds lyrics only. JSON envelope when piped or --json"
+                "raw_output": "human mode without --out: the lyric skeleton ONLY on stdout (safe to redirect or paste as a lyrics input); title, style prompt, suno tags and handoff on stderr. With --out: nothing on stdout, the file holds lyrics only. JSON envelope when piped or --json"
             }),
         ),
         (
@@ -192,7 +199,7 @@ fn command_map() -> serde_json::Map<String, Value> {
                     {"name": "--at", "type": "number", "required": true, "description": "Timestamp in seconds to continue from"},
                     {"name": "--lyrics", "type": "string", "required": false, "description": "New lyrics for the extension"},
                     {"name": "--tags", "type": "string", "required": false, "description": "Style tags"},
-                    model_option, wait_option, token_option, no_captcha_option, force_option
+                    model_option, wait_option, token_option, no_captcha_option, scaffold_force_option
                 ]
             }),
         ),

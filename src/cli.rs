@@ -19,7 +19,7 @@ Tips:
 Examples:
   suno write --genre \"indie rock\" --theme \"late-night city drives\" --vocal male --out song.txt
   # fill the <...> lyric slots in song.txt, then run the generate command `write` printed:
-  suno generate --title \"Night Drive\" --tags \"Indie rock, ...\" --lyrics-file song.txt --wait --download ./songs/
+  suno generate --title \"Night Drive\" --tags \"Indie rock, jangly guitars, warm male vocals, 110 BPM\" --lyrics-file song.txt --wait --download ./songs/
     The full flow: compose, fill, render, download (lyrics embedded in the MP3)
 
   suno describe --prompt \"a chill lo-fi track about rainy mornings\" --wait --download ./
@@ -470,7 +470,7 @@ pub struct ExtendArgs {
     #[arg(long)]
     pub no_captcha: bool,
 
-    /// Bypass the duplicate-run guard
+    /// Bypass the duplicate-run guard and the unresolved-placeholder preflight
     #[arg(long)]
     pub force: bool,
 

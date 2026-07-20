@@ -50,6 +50,24 @@ fn read_input_file(path: &str) -> Result<String, CliError> {
         .map_err(|e| CliError::InvalidInput(format!("cannot read input file '{path}': {e}")))
 }
 
+/// Credit protection shared by every command that sends lyrics into the
+/// v2-web `prompt` field (generate, extend): an unfilled `suno write`
+/// scaffold would be sung verbatim at real credit cost. Refuse it unless
+/// forced.
+fn reject_unfilled_scaffold(lyrics: Option<&str>, force: bool) -> Result<(), CliError> {
+    let Some(text) = lyrics else { return Ok(()) };
+    let lines = commands::write::placeholder_lines(text);
+    if lines.is_empty() || force {
+        return Ok(());
+    }
+    let numbers: Vec<String> = lines.iter().map(|n| n.to_string()).collect();
+    Err(CliError::InvalidInput(format!(
+        "lyrics contain {} unresolved scaffold placeholder(s) at line(s) {} — fill the <...> spans before generating (or pass --force to send them as written)",
+        lines.len(),
+        numbers.join(", ")
+    )))
+}
+
 fn build_tags(tags: Option<&str>, vocal: Option<&VocalGender>) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     if let Some(t) = tags {
@@ -456,19 +474,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 (_, Some(path)) => Some(read_input_file(path)?),
                 _ => None,
             };
-            // Credit protection: an unfilled `suno write` scaffold would be
-            // sung verbatim at ~70 credits a call. Refuse it unless forced.
-            if let Some(text) = lyrics.as_deref() {
-                let lines = commands::write::placeholder_lines(text);
-                if !lines.is_empty() && !args.force {
-                    let numbers: Vec<String> = lines.iter().map(|n| n.to_string()).collect();
-                    return Err(CliError::InvalidInput(format!(
-                        "lyrics contain {} unresolved scaffold placeholder(s) at line(s) {} — fill the <...> spans before generating (or pass --force to send them as written)",
-                        lines.len(),
-                        numbers.join(", ")
-                    )));
-                }
-            }
+            reject_unfilled_scaffold(lyrics.as_deref(), args.force)?;
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
             let control_sliders =
                 build_control_sliders(args.weirdness, args.style_influence, args.audio_influence);
@@ -560,7 +566,9 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             let model = resolve_model(args.model, &cfg)?;
 
             // extend spends credits through the same v2-web create as generate,
-            // so it gets the same duplicate guard before any credit is spent.
+            // so it gets the same scaffold preflight and duplicate guard
+            // before any credit is spent.
+            reject_unfilled_scaffold(args.lyrics.as_deref(), args.force)?;
             let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "extend");
             guard.acquire(args.force)?;
 
@@ -1051,5 +1059,22 @@ mod tests {
             Some("pop, female vocals")
         );
         assert_eq!(build_tags(None, None), None);
+    }
+
+    #[test]
+    fn scaffold_preflight_covers_every_lyrics_path() {
+        // The guard generate AND extend share: unresolved spans are refused...
+        let scaffold = "[Verse]\n<4-6 lines — set the scene>\n";
+        assert!(matches!(
+            reject_unfilled_scaffold(Some(scaffold), false),
+            Err(CliError::InvalidInput(_))
+        ));
+        // ...including spans split across lines...
+        let split = "[Verse]\n<4-6 lines — set the scene:\nroad trips>\n";
+        assert!(reject_unfilled_scaffold(Some(split), false).is_err());
+        // ...while --force, filled lyrics, and no lyrics pass through.
+        assert!(reject_unfilled_scaffold(Some(scaffold), true).is_ok());
+        assert!(reject_unfilled_scaffold(Some("[Verse]\nwe rise\n"), false).is_ok());
+        assert!(reject_unfilled_scaffold(None, false).is_ok());
     }
 }
