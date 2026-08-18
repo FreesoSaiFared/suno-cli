@@ -137,8 +137,9 @@ impl SunoClient {
         Ok(())
     }
 
-    /// Query upload processing status. A 404 means the upload disappeared
-    /// after processing/moderation, so callers can surface that separately.
+    /// Query upload processing status. A 404 or an explicit `deleted` state
+    /// means the upload disappeared after processing/moderation, so callers
+    /// can surface the rejection immediately rather than waiting to timeout.
     pub async fn upload_audio_status(
         &self,
         upload_id: &str,
@@ -165,6 +166,10 @@ impl SunoClient {
             code: "parse_error",
             message: format!("Failed to parse upload status: {e}"),
         })?;
+
+        if status_resp.status == "deleted" {
+            return Ok(None);
+        }
 
         Ok(Some(status_resp))
     }
