@@ -80,12 +80,7 @@ impl SunoClient {
         init: &UploadAudioResponse,
         data: Vec<u8>,
     ) -> Result<(), CliError> {
-        let file_name = init
-            .fields
-            .key
-            .rsplit('/')
-            .next()
-            .unwrap_or("audio.mp3");
+        let file_name = init.fields.key.rsplit('/').next().unwrap_or("audio.mp3");
 
         let file_part = reqwest::multipart::Part::bytes(data)
             .file_name(file_name.to_string())
