@@ -1,0 +1,37 @@
+name: Temporary fusion command runner
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  apply:
+    if: github.event.issue.pull_request && github.event.issue.number == 3 && github.event.comment.body == '/apply-fusion'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fusion/iinlanjian-features
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Apply deterministic fusion patch
+        run: python scripts/fusion_apply.py
+      - name: Validate
+        run: |
+          cargo fmt --all
+          cargo check --all-targets
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+      - name: Commit validated result
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm -f .github/workflows/fusion-apply.yml .github/workflows/fusion-apply-v2.yml .fusion-trigger .fusion-trigger2 scripts/fusion_apply.py || true
+          git add src/cli.rs src/main.rs Cargo.lock
+          git commit -m "feat: wire upload, init-clip, and enhanced cover controls"
+          git push origin HEAD:fusion/iinlanjian-features
