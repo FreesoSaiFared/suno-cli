@@ -9,6 +9,11 @@ impl SunoClient {
     /// web-app capture for the cover flow, so this is a best-guess port — if
     /// the API rejects, we'll need to capture a real cover request and add
     /// any missing required fields (e.g. cover_start_s/cover_end_s).
+    ///
+    /// Retained as a compatibility wrapper for callers outside the CLI. The
+    /// enriched CLI cover path builds `GenerateRequest` directly so it can
+    /// expose title, replacement lyrics, vocal tags, and all control sliders.
+    #[allow(dead_code)]
     pub async fn cover(
         &self,
         clip_id: &str,
