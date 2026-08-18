@@ -40,6 +40,14 @@ pub struct UploadStatusResponse {
     pub title: String,
 }
 
+fn processing_status(upload_id: &str) -> UploadStatusResponse {
+    UploadStatusResponse {
+        id: upload_id.to_string(),
+        status: "processing".to_string(),
+        title: String::new(),
+    }
+}
+
 impl SunoClient {
     /// Step 1: Request an upload slot for an audio file.
     /// POST /api/uploads/audio/ with {"extension": "mp3"}
@@ -138,19 +146,34 @@ impl SunoClient {
     }
 
     /// Query upload processing status. A 404 or an explicit `deleted` state
-    /// means the upload disappeared after processing/moderation, so callers
-    /// can surface the rejection immediately rather than waiting to timeout.
+    /// means the upload disappeared after processing/moderation. Network
+    /// failures, HTTP 429, and 5xx responses are treated as still processing:
+    /// the caller already has a bounded poll loop, so a transient status check
+    /// cannot discard an audio file that was successfully uploaded to S3.
     pub async fn upload_audio_status(
         &self,
         upload_id: &str,
     ) -> Result<Option<UploadStatusResponse>, CliError> {
-        let resp = self
+        let resp = match self
             .get(&format!("/api/uploads/audio/{upload_id}/"))
             .send()
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) if e.is_timeout() || e.is_connect() || e.is_request() => {
+                return Ok(Some(processing_status(upload_id)));
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
+        }
+
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || resp.status().is_server_error()
+        {
+            return Ok(Some(processing_status(upload_id)));
         }
 
         if !resp.status().is_success() {
