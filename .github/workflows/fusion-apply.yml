@@ -1,0 +1,397 @@
+name: Apply selective fork fusion
+
+on:
+  push:
+    branches: [fusion/iinlanjian-features]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fusion/iinlanjian-features
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply exact feature delta
+        shell: python
+        run: |
+          from pathlib import Path
+
+          cli = Path('src/cli.rs')
+          s = cli.read_text()
+
+          old = '''    /// Extract stems (vocals, instruments) from a clip
+              Stems(StemsArgs),
+
+              /// Show detailed info for a single clip
+              Info(InfoArgs),'''
+          new = '''    /// Extract stems (vocals, instruments) from a clip
+              Stems(StemsArgs),
+
+              /// Upload a local audio file to Suno
+              Upload(UploadArgs),
+
+              /// Convert a completed upload ID into a clip ID
+              InitClip(InitClipArgs),
+
+              /// Show detailed info for a single clip
+              Info(InfoArgs),'''
+          assert old in s, 'Commands insertion anchor changed'
+          s = s.replace(old, new, 1)
+
+          old = '''#[derive(clap::Args)]
+          pub struct CoverArgs {
+              /// Clip ID to create a cover of
+              pub clip_id: String,
+
+              /// Style tags for the cover
+              #[arg(long)]
+              pub tags: Option<String>,
+
+              /// Model version for the cover (default: config `default_model`)
+              #[arg(short, long)]
+              pub model: Option<ModelVersion>,
+
+              /// Audio influence strength (0-100) — how strongly the source clip
+              /// shapes the cover
+              #[arg(long)]
+              pub audio_influence: Option<f64>,
+
+              /// Bypass the duplicate-run guard
+              #[arg(long)]
+              pub force: bool,
+
+              /// hCaptcha token (overrides the auto-solver)
+              #[arg(long)]
+              pub token: Option<String>,
+
+              /// Skip the built-in hCaptcha auto-solver
+              #[arg(long)]
+              pub no_captcha: bool,
+
+              /// Wait for completion
+              #[arg(short, long)]
+              pub wait: bool,
+
+              /// Download output to directory
+              #[arg(long)]
+              pub download: Option<String>,
+          }'''
+          new = '''#[derive(clap::Args)]
+          pub struct CoverArgs {
+              /// Clip ID or initialized upload clip ID to create a cover of
+              pub clip_id: String,
+
+              /// Song title (defaults to cover_<clip-prefix>)
+              #[arg(long)]
+              pub title: Option<String>,
+
+              /// Style tags for the cover
+              #[arg(long)]
+              pub tags: Option<String>,
+
+              /// Replacement lyrics
+              #[arg(long, conflicts_with = "lyrics_file")]
+              pub lyrics: Option<String>,
+
+              /// Read replacement lyrics from file
+              #[arg(long)]
+              pub lyrics_file: Option<String>,
+
+              /// Vocal gender direction
+              #[arg(long)]
+              pub vocal: Option<VocalGender>,
+
+              /// Model version for the cover (default: config `default_model`)
+              #[arg(short, long)]
+              pub model: Option<ModelVersion>,
+
+              /// Weirdness level (0-100)
+              #[arg(long)]
+              pub weirdness: Option<f64>,
+
+              /// Style influence strength (0-100)
+              #[arg(long)]
+              pub style_influence: Option<f64>,
+
+              /// Audio influence strength (0-100) — how strongly the source clip
+              /// shapes the cover
+              #[arg(long)]
+              pub audio_influence: Option<f64>,
+
+              /// Bypass the duplicate-run guard and unresolved-placeholder preflight
+              #[arg(long)]
+              pub force: bool,
+
+              /// hCaptcha token (overrides the auto-solver)
+              #[arg(long)]
+              pub token: Option<String>,
+
+              /// Skip the built-in hCaptcha auto-solver
+              #[arg(long)]
+              pub no_captcha: bool,
+
+              /// Wait for completion
+              #[arg(short, long)]
+              pub wait: bool,
+
+              /// Download output to directory
+              #[arg(long)]
+              pub download: Option<String>,
+          }'''
+          assert old in s, 'CoverArgs anchor changed'
+          s = s.replace(old, new, 1)
+
+          old = '''#[derive(clap::Args)]
+          pub struct StemsArgs {
+              /// Clip ID to extract stems from
+              pub clip_id: String,
+          }
+
+          #[derive(clap::Args)]
+          pub struct ListArgs {'''
+          new = '''#[derive(clap::Args)]
+          pub struct StemsArgs {
+              /// Clip ID to extract stems from
+              pub clip_id: String,
+          }
+
+          #[derive(clap::Args)]
+          pub struct UploadArgs {
+              /// Local audio file (mp3, wav, flac, ogg, m4a, aac, or wma)
+              pub file: String,
+          }
+
+          #[derive(clap::Args)]
+          pub struct InitClipArgs {
+              /// Upload ID returned by `suno upload`
+              pub upload_id: String,
+          }
+
+          #[derive(clap::Args)]
+          pub struct ListArgs {'''
+          assert old in s, 'argument insertion anchor changed'
+          s = s.replace(old, new, 1)
+          cli.write_text(s)
+
+          main = Path('src/main.rs')
+          s = main.read_text()
+
+          old_start = '''        Commands::Cover(args) => {
+              let cfg = config::AppConfig::load()?;
+              let model = resolve_model(args.model, &cfg)?;
+              let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "cover");
+              guard.acquire(args.force)?;
+
+              let c = client().await?;
+              let token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+              let control_sliders = build_control_sliders(None, None, args.audio_influence);
+
+              if !cli.quiet {
+                  eprintln!("Creating cover ({})...", model.display_name());
+              }
+              let clips = c
+                  .cover(
+                      &args.clip_id,
+                      model.to_api_key(),
+                      args.tags.as_deref(),
+                      token,
+                      control_sliders,
+                  )
+                  .await?;
+              handle_generation(
+                  &c,
+                  clips,
+                  args.wait,
+                  args.download.as_deref(),
+                  fmt,
+                  cli.quiet,
+                  &cfg,
+              )
+              .await?;
+          }'''
+          new_start = '''        Commands::Cover(args) => {
+              let cfg = config::AppConfig::load()?;
+              let model = resolve_model(args.model, &cfg)?;
+              let lyrics = match (&args.lyrics, &args.lyrics_file) {
+                  (Some(text), _) => Some(text.clone()),
+                  (_, Some(path)) => Some(read_input_file(path)?),
+                  _ => None,
+              };
+              reject_unfilled_scaffold(lyrics.as_deref(), args.force)?;
+              let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
+              let control_sliders = build_control_sliders(
+                  args.weirdness,
+                  args.style_influence,
+                  args.audio_influence,
+              );
+              let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "cover");
+              guard.acquire(args.force)?;
+
+              let c = client().await?;
+              let token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+              let prefix: String = args.clip_id.chars().take(8).collect();
+              let mut req = GenerateRequest::new(model.to_api_key(), "cover");
+              req.generation_type = "AUDIO".to_string();
+              req.title = Some(args.title.unwrap_or_else(|| format!("cover_{prefix}")));
+              req.tags = tags;
+              req.prompt = lyrics.unwrap_or_default();
+              req.cover_clip_id = Some(args.clip_id);
+              req.token = token;
+              req.metadata.control_sliders = control_sliders;
+
+              if !cli.quiet {
+                  eprintln!("Creating cover ({})...", model.display_name());
+              }
+              let clips = c.generate(&req).await?;
+              handle_generation(
+                  &c,
+                  clips,
+                  args.wait,
+                  args.download.as_deref(),
+                  fmt,
+                  cli.quiet,
+                  &cfg,
+              )
+              .await?;
+          }'''
+          assert old_start in s, 'cover handler anchor changed'
+          s = s.replace(old_start, new_start, 1)
+
+          anchor = '''        Commands::Stems(args) => {
+              let clip = client().await?.stems(&args.clip_id).await?;
+              match fmt {
+                  OutputFormat::Json => output::json::success(&clip),
+                  OutputFormat::Table => output::table::clips(&[clip]),
+              }
+          }
+
+          Commands::Info(args) => {'''
+          replacement = '''        Commands::Stems(args) => {
+              let clip = client().await?.stems(&args.clip_id).await?;
+              match fmt {
+                  OutputFormat::Json => output::json::success(&clip),
+                  OutputFormat::Table => output::table::clips(&[clip]),
+              }
+          }
+
+          Commands::Upload(args) => {
+              let path = std::path::Path::new(&args.file);
+              if !path.is_file() {
+                  return Err(CliError::InvalidInput(format!("file not found: {}", args.file)));
+              }
+              let extension = path
+                  .extension()
+                  .and_then(|ext| ext.to_str())
+                  .unwrap_or("")
+                  .to_ascii_lowercase();
+              if !matches!(extension.as_str(), "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "wma") {
+                  return Err(CliError::InvalidInput(format!(
+                      "unsupported audio format '.{extension}' — use mp3, wav, flac, ogg, m4a, aac, or wma"
+                  )));
+              }
+              let data = std::fs::read(path).map_err(|e| {
+                  CliError::InvalidInput(format!("cannot read input file '{}': {e}", args.file))
+              })?;
+              let filename = path
+                  .file_name()
+                  .and_then(|name| name.to_str())
+                  .unwrap_or("audio.mp3")
+                  .to_string();
+              if !cli.quiet {
+                  let size_mb = data.len() as f64 / 1024.0 / 1024.0;
+                  eprintln!("Uploading {} ({size_mb:.1} MB, {extension})...", args.file);
+              }
+              let c = client().await?;
+              let init = c.upload_audio_init(&extension).await?;
+              if !cli.quiet {
+                  eprintln!("Got upload slot (id: {}), sending file to S3...", init.id);
+              }
+              c.upload_audio_to_s3(&init, data).await?;
+              c.upload_audio_finish(&init.id, &filename).await?;
+              if !cli.quiet {
+                  eprintln!("Upload complete; waiting for Suno audio processing...");
+              }
+
+              let mut final_status = "processing".to_string();
+              for poll in 1..=30u32 {
+                  tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                  match c.upload_audio_status(&init.id).await? {
+                      Some(status) => {
+                          final_status = status.status;
+                          if !cli.quiet {
+                              eprintln!("[{}s] Status: {}", poll * 5, final_status);
+                          }
+                          if final_status == "complete" {
+                              break;
+                          }
+                          if final_status == "error" {
+                              return Err(CliError::GenerationFailed(
+                                  "upload processing failed after Suno moderation/processing".into(),
+                              ));
+                          }
+                      }
+                      None => {
+                          return Err(CliError::GenerationFailed(
+                              "upload disappeared during processing (removed or rejected by Suno)".into(),
+                          ));
+                      }
+                  }
+              }
+              if final_status != "complete" {
+                  return Err(CliError::GenerationFailed(format!(
+                      "upload processing timed out with status '{final_status}'"
+                  )));
+              }
+              match fmt {
+                  OutputFormat::Json => output::json::success(serde_json::json!({
+                      "upload_id": init.id,
+                      "status": final_status,
+                  })),
+                  OutputFormat::Table => {
+                      eprintln!("Upload ID: {}", init.id);
+                      eprintln!("Status: {final_status}");
+                      eprintln!("Next: suno init-clip {}", init.id);
+                  }
+              }
+          }
+
+          Commands::InitClip(args) => {
+              let clip_id = client().await?.initialize_clip(&args.upload_id).await?;
+              match fmt {
+                  OutputFormat::Json => output::json::success(serde_json::json!({
+                      "upload_id": args.upload_id,
+                      "clip_id": clip_id,
+                  })),
+                  OutputFormat::Table => {
+                      eprintln!("upload_id: {}", args.upload_id);
+                      eprintln!("clip_id:   {clip_id}");
+                  }
+              }
+          }
+
+          Commands::Info(args) => {'''
+          assert anchor in s, 'upload handler insertion anchor changed'
+          s = s.replace(anchor, replacement, 1)
+          main.write_text(s)
+
+      - name: Format and validate
+        run: |
+          cargo fmt --all
+          cargo check --all-targets
+          cargo test
+      - name: Commit transformed source and remove one-shot workflow
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/fusion-apply.yml
+          git add src/cli.rs src/main.rs Cargo.lock
+          git commit -m "feat: wire upload, init-clip, and enhanced cover controls"
+          git push origin HEAD:fusion/iinlanjian-features
