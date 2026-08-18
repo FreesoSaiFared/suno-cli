@@ -85,6 +85,12 @@ pub enum Commands {
     /// Extract stems (vocals, instruments) from a clip
     Stems(StemsArgs),
 
+    /// Upload a local audio file to Suno
+    Upload(UploadArgs),
+
+    /// Convert a completed upload ID into a clip ID
+    InitClip(InitClipArgs),
+
     /// Show detailed info for a single clip
     Info(InfoArgs),
 
@@ -487,23 +493,46 @@ pub struct ConcatArgs {
 
 #[derive(clap::Args)]
 pub struct CoverArgs {
-    /// Clip ID to create a cover of
+    /// Clip ID or initialized upload clip ID to create a cover of
     pub clip_id: String,
+
+    /// Song title (defaults to cover_<clip-prefix>)
+    #[arg(long)]
+    pub title: Option<String>,
 
     /// Style tags for the cover
     #[arg(long)]
     pub tags: Option<String>,
 
+    /// Replacement lyrics
+    #[arg(long, conflicts_with = "lyrics_file")]
+    pub lyrics: Option<String>,
+
+    /// Read replacement lyrics from file
+    #[arg(long)]
+    pub lyrics_file: Option<String>,
+
+    /// Vocal gender direction
+    #[arg(long)]
+    pub vocal: Option<VocalGender>,
+
     /// Model version for the cover (default: config `default_model`)
     #[arg(short, long)]
     pub model: Option<ModelVersion>,
 
-    /// Audio influence strength (0-100) — how strongly the source clip
-    /// shapes the cover
+    /// Weirdness level (0-100)
+    #[arg(long)]
+    pub weirdness: Option<f64>,
+
+    /// Style influence strength (0-100)
+    #[arg(long)]
+    pub style_influence: Option<f64>,
+
+    /// Audio influence strength (0-100) — how strongly the source clip shapes the cover
     #[arg(long)]
     pub audio_influence: Option<f64>,
 
-    /// Bypass the duplicate-run guard
+    /// Bypass the duplicate-run guard and unresolved-placeholder preflight
     #[arg(long)]
     pub force: bool,
 
@@ -570,6 +599,18 @@ pub struct PersonaArgs {
 pub struct StemsArgs {
     /// Clip ID to extract stems from
     pub clip_id: String,
+}
+
+#[derive(clap::Args)]
+pub struct UploadArgs {
+    /// Local audio file (mp3, wav, flac, ogg, m4a, aac, or wma)
+    pub file: String,
+}
+
+#[derive(clap::Args)]
+pub struct InitClipArgs {
+    /// Upload ID returned by `suno upload`
+    pub upload_id: String,
 }
 
 #[derive(clap::Args)]

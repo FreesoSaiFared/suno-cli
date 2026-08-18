@@ -1,11 +1,11 @@
 ---
 name: suno
-description: The complete Suno tool — write and generate AI music from the terminal with the `suno` CLI. Use when the user asks to generate/make/create a song, music, a track, or audio; to write a song or lyrics for Suno; for catchy/viral/earworm hooks; for covers, remasters, stems, or voice personas; to download Suno songs (auto-embeds lyrics into MP3); or for priming/subliminal/charm/research songs — "prime [name] to [action]", subliminal song, charm round, research priming, or a song "for the paper". `suno write` scaffolds the song from a built-in grammar, `suno generate` renders the audio. Run `suno agent-info` for the full machine-readable capability dump.
+description: The complete Suno tool — write, upload, and generate AI music from the terminal with the `suno` CLI. Use when the user asks to generate/make/create a song, music, a track, or audio; to upload source audio to Suno; to write a song or lyrics for Suno; for catchy/viral/earworm hooks; for covers, remasters, stems, or voice personas; to download Suno songs (auto-embeds lyrics into MP3); or for priming/subliminal/charm/research songs — "prime [name] to [action]", subliminal song, charm round, research priming, or a song "for the paper". `suno write` scaffolds the song, `suno upload` imports local audio, and `suno generate` renders audio. Run `suno agent-info` for the full machine-readable capability dump.
 ---
 
 # suno CLI
 
-One binary does the whole job — composing the song and rendering the audio. All capability detail lives in the binary so it never drifts from this file.
+One binary does the whole job — composing songs, importing source audio, and rendering the result. All capability detail lives in the binary; use `suno agent-info` whenever exact current flags matter.
 
 ## Make a song
 
@@ -20,6 +20,31 @@ One binary does the whole job — composing the song and rendering the audio. Al
    suno generate --title "..." --tags "<style_prompt>" --lyrics-file song.txt --wait --download ./songs/
    ```
    `generate` exits 3 if any `<...>` placeholder survives, so an unfilled scaffold can never burn credits. It renders on the configured default model — v5.5, Suno's latest (~70 credits) — unless you pass `--model`.
+
+## Upload source audio and make covers
+
+Import a local audio file, wait for Suno processing, then convert the returned upload ID to a normal clip ID:
+
+```bash
+suno upload ./source.mp3
+suno init-clip <upload_id>
+```
+
+`upload` accepts mp3, wav, flac, ogg, m4a, aac, and wma. Use the resulting clip ID anywhere a source clip is accepted. Covers expose replacement lyrics and the same useful control surface as generation:
+
+```bash
+suno cover <clip_id> \
+  --title "New title" \
+  --tags "baroque pop, analog warmth" \
+  --lyrics-file replacement.txt \
+  --vocal male \
+  --weirdness 25 \
+  --style-influence 60 \
+  --audio-influence 80 \
+  --wait --download ./covers/
+```
+
+Use `suno cover --help` and `suno agent-info` rather than assuming defaults or accepted models.
 
 ## Priming / research songs
 

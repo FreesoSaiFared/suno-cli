@@ -596,25 +596,34 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         Commands::Cover(args) => {
             let cfg = config::AppConfig::load()?;
             let model = resolve_model(args.model, &cfg)?;
+            let lyrics = match (&args.lyrics, &args.lyrics_file) {
+                (Some(text), _) => Some(text.clone()),
+                (_, Some(path)) => Some(read_input_file(path)?),
+                _ => None,
+            };
+            reject_unfilled_scaffold(lyrics.as_deref(), args.force)?;
+            let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
+            let control_sliders =
+                build_control_sliders(args.weirdness, args.style_influence, args.audio_influence);
             let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "cover");
             guard.acquire(args.force)?;
 
             let c = client().await?;
             let token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
-            let control_sliders = build_control_sliders(None, None, args.audio_influence);
+            let prefix: String = args.clip_id.chars().take(8).collect();
+            let mut req = GenerateRequest::new(model.to_api_key(), "cover");
+            req.generation_type = "AUDIO".to_string();
+            req.title = Some(args.title.unwrap_or_else(|| format!("cover_{prefix}")));
+            req.tags = tags;
+            req.prompt = lyrics.unwrap_or_default();
+            req.cover_clip_id = Some(args.clip_id);
+            req.token = token;
+            req.metadata.control_sliders = control_sliders;
 
             if !cli.quiet {
                 eprintln!("Creating cover ({})...", model.display_name());
             }
-            let clips = c
-                .cover(
-                    &args.clip_id,
-                    model.to_api_key(),
-                    args.tags.as_deref(),
-                    token,
-                    control_sliders,
-                )
-                .await?;
+            let clips = c.generate(&req).await?;
             handle_generation(
                 &c,
                 clips,
@@ -658,6 +667,108 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             match fmt {
                 OutputFormat::Json => output::json::success(&clip),
                 OutputFormat::Table => output::table::clips(&[clip]),
+            }
+        }
+
+        Commands::Upload(args) => {
+            let path = std::path::Path::new(&args.file);
+            if !path.is_file() {
+                return Err(CliError::InvalidInput(format!(
+                    "file not found: {}",
+                    args.file
+                )));
+            }
+            let extension = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !matches!(
+                extension.as_str(),
+                "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "wma"
+            ) {
+                return Err(CliError::InvalidInput(format!(
+                    "unsupported audio format '.{extension}' — use mp3, wav, flac, ogg, m4a, aac, or wma"
+                )));
+            }
+            let data = std::fs::read(path).map_err(|e| {
+                CliError::InvalidInput(format!("cannot read input file '{}': {e}", args.file))
+            })?;
+            let filename = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("audio.mp3")
+                .to_string();
+            if !cli.quiet {
+                let size_mb = data.len() as f64 / 1024.0 / 1024.0;
+                eprintln!("Uploading {} ({size_mb:.1} MB, {extension})...", args.file);
+            }
+            let c = client().await?;
+            let init = c.upload_audio_init(&extension).await?;
+            if !cli.quiet {
+                eprintln!("Got upload slot (id: {}), sending file to S3...", init.id);
+            }
+            c.upload_audio_to_s3(&init, data).await?;
+            c.upload_audio_finish(&init.id, &filename).await?;
+            if !cli.quiet {
+                eprintln!("Upload complete; waiting for Suno audio processing...");
+            }
+
+            let mut final_status = "processing".to_string();
+            for poll in 1..=30u32 {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                match c.upload_audio_status(&init.id).await? {
+                    Some(status) => {
+                        final_status = status.status;
+                        if !cli.quiet {
+                            eprintln!("[{}s] Status: {}", poll * 5, final_status);
+                        }
+                        if final_status == "complete" {
+                            break;
+                        }
+                        if final_status == "error" {
+                            return Err(CliError::GenerationFailed(
+                                "upload processing failed after Suno moderation/processing".into(),
+                            ));
+                        }
+                    }
+                    None => {
+                        return Err(CliError::GenerationFailed(
+                            "upload disappeared during processing (removed or rejected by Suno)"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            if final_status != "complete" {
+                return Err(CliError::GenerationFailed(format!(
+                    "upload processing timed out with status '{final_status}'"
+                )));
+            }
+            match fmt {
+                OutputFormat::Json => output::json::success(serde_json::json!({
+                    "upload_id": init.id,
+                    "status": final_status,
+                })),
+                OutputFormat::Table => {
+                    eprintln!("Upload ID: {}", init.id);
+                    eprintln!("Status: {final_status}");
+                    eprintln!("Next: suno init-clip {}", init.id);
+                }
+            }
+        }
+
+        Commands::InitClip(args) => {
+            let clip_id = client().await?.initialize_clip(&args.upload_id).await?;
+            match fmt {
+                OutputFormat::Json => output::json::success(serde_json::json!({
+                    "upload_id": args.upload_id,
+                    "clip_id": clip_id,
+                })),
+                OutputFormat::Table => {
+                    eprintln!("upload_id: {}", args.upload_id);
+                    eprintln!("clip_id:   {clip_id}");
+                }
             }
         }
 

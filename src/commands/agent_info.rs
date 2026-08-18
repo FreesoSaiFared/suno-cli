@@ -214,13 +214,19 @@ fn command_map() -> serde_json::Map<String, Value> {
         (
             "cover",
             json!({
-                "description": "Create a cover of an existing clip",
+                "description": "Create a cover of an existing clip or initialized upload clip",
                 "args": [clip_id_arg],
                 "options": [
+                    {"name": "--title", "type": "string", "required": false, "description": "Song title; defaults to cover_<clip-prefix>"},
                     {"name": "--tags", "type": "string", "required": false, "description": "Style tags for the cover"},
+                    {"name": "--lyrics", "type": "string", "required": false, "description": "Replacement lyrics"},
+                    {"name": "--lyrics-file", "type": "string", "required": false, "description": "Read replacement lyrics from file"},
+                    {"name": "--vocal", "type": "string", "required": false, "values": ["male", "female"], "description": "Vocal gender direction"},
                     model_option,
+                    {"name": "--weirdness", "type": "number", "required": false, "description": "0-100"},
+                    {"name": "--style-influence", "type": "number", "required": false, "description": "0-100"},
                     {"name": "--audio-influence", "type": "number", "required": false, "description": "0-100, how strongly the source clip shapes the cover"},
-                    wait_option, download_option, token_option, no_captcha_option, force_option
+                    wait_option, download_option, token_option, no_captcha_option, scaffold_force_option
                 ]
             }),
         ),
@@ -242,6 +248,28 @@ fn command_map() -> serde_json::Map<String, Value> {
             json!({
                 "description": "Extract stems (vocals, instruments) from a clip",
                 "args": [clip_id_arg],
+                "options": []
+            }),
+        ),
+        (
+            "upload",
+            json!({
+                "description": "Upload a local audio file to Suno and wait for processing",
+                "args": [
+                    {"name": "file", "kind": "positional", "type": "string", "required": true,
+                     "description": "Local mp3, wav, flac, ogg, m4a, aac, or wma file"}
+                ],
+                "options": []
+            }),
+        ),
+        (
+            "init-clip",
+            json!({
+                "description": "Convert a completed audio upload ID into a Suno clip ID",
+                "args": [
+                    {"name": "upload_id", "kind": "positional", "type": "string", "required": true,
+                     "description": "Upload ID returned by suno upload"}
+                ],
                 "options": []
             }),
         ),
@@ -493,7 +521,7 @@ pub fn run() {
     let info = json!({
         "name": "suno",
         "version": env!("CARGO_PKG_VERSION"),
-        "description": "Write, generate, and manage Suno music — a native song composer (`write`), v5.5 generation with voice personas, covers, remasters, and built-in songwriting guides",
+        "description": "Write, generate, upload, and manage Suno music — a native song composer (`write`), v5.5 generation with voice personas, covers, remasters, audio upload, and built-in songwriting guides",
         "commands": command_map(),
         // Built-in songwriting knowledge, discoverable via `suno guide <name>`.
         "guides": guide_map(),
@@ -554,6 +582,7 @@ pub fn run() {
             "tags", "negative_tags", "vocal_gender",
             "weirdness", "style_influence", "audio_influence",
             "instrumental", "extend", "concat", "cover", "remaster",
+            "audio_upload", "upload_initialize_clip",
             "stems", "lyrics", "timed_lyrics", "set_metadata",
             "set_visibility", "search", "delete", "captcha_check",
             "id3_lyrics_embedding", "voice_persona", "clip_info"
