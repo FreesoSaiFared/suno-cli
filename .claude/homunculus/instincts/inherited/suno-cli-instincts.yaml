@@ -1,0 +1,151 @@
+# Instincts generated from https://github.com/FreesoSaiFared/suno-cli
+# Generated: 2026-08-18T17:31:09.649Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: suno-cli-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/FreesoSaiFared/suno-cli
+---
+
+# Suno Cli Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: fix, feat, docs
+
+## Evidence
+
+- 11 commits analyzed
+- Detected conventional commit pattern
+- Examples: feat: add `suno upload` command — upload local audio files to Suno, fix: cover command missing lyrics support
+
+---
+id: suno-cli-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/FreesoSaiFared/suno-cli
+---
+
+# Suno Cli Commit Length
+
+## Action
+
+Write moderate-length commit messages (~50 characters)
+
+## Evidence
+
+- Average commit message length: 50 chars
+- Based on 11 commits
+
+---
+id: suno-cli-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/FreesoSaiFared/suno-cli
+---
+
+# Suno Cli Naming Files
+
+## Action
+
+Use camelCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: camelCase
+
+---
+id: suno-cli-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/FreesoSaiFared/suno-cli
+---
+
+# Suno Cli Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: suno-cli-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/FreesoSaiFared/suno-cli
+---
+
+# Suno Cli Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: suno-cli-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/FreesoSaiFared/suno-cli
+---
+
+# Suno Cli Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: suno-cli-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/FreesoSaiFared/suno-cli
+---
+
+# Suno Cli Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~19x per month
+- Files: **/api/**
+
