@@ -31,20 +31,6 @@ pub struct S3Fields {
     pub signature: String,
 }
 
-/// Determine MIME content type from file extension.
-pub fn content_type_for_ext(ext: &str) -> &'static str {
-    match ext {
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "ogg" => "audio/ogg",
-        "flac" => "audio/flac",
-        "m4a" => "audio/mp4",
-        "aac" => "audio/aac",
-        "wma" => "audio/x-ms-wma",
-        _ => "application/octet-stream",
-    }
-}
-
 /// Response from GET /api/uploads/audio/{id}/ — upload processing status.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct UploadStatusResponse {
