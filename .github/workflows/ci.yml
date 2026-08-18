@@ -99,6 +99,7 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git show origin/main:.github/workflows/ci.yml > .github/workflows/ci.yml
+          git rm -f .fusion-agent-trigger || true
           git add src/commands/agent_info.rs .github/workflows/ci.yml
           git commit -m "docs(agent-info): advertise upload and enhanced cover"
           git pull --rebase origin fusion/iinlanjian-features
