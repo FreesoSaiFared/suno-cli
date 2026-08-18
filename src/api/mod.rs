@@ -11,6 +11,7 @@ pub mod persona;
 pub mod remaster;
 pub mod stems;
 pub mod types;
+pub mod upload;
 
 use std::sync::Mutex;
 
