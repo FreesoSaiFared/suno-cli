@@ -1,10 +1,12 @@
 use crate::auth::BrowserAuth;
 use crate::errors::CliError;
+#[cfg(windows)]
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+#[cfg(windows)]
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
 use std::env;
@@ -26,13 +28,7 @@ struct BrowserSpec {
 }
 
 const CHROMIUM_BROWSERS: &[&str] = &[
-    "brave",
-    "chrome",
-    "chromium",
-    "edge",
-    "opera",
-    "vivaldi",
-    "whale",
+    "brave", "chrome", "chromium", "edge", "opera", "vivaldi", "whale",
 ];
 
 /// Native Rust implementation of the browser-cookie subset used by yt-dlp's
@@ -47,19 +43,13 @@ pub fn extract_browser_auth(spec: Option<&str>) -> Result<BrowserAuth, CliError>
 
     let mut failures = Vec::new();
     for browser in [
-        "brave",
-        "chrome",
-        "edge",
-        "chromium",
-        "vivaldi",
-        "opera",
-        "firefox",
+        "brave", "chrome", "edge", "chromium", "vivaldi", "opera", "firefox",
     ] {
         let parsed = BrowserSpec {
             browser: browser.to_string(),
             profile: None,
         };
-        match extract_for_spec(&parsed).and_then(|c| records_to_browser_auth(browser, c)) {
+        match extract_for_spec(&parsed).and_then(|cookies| records_to_browser_auth(browser, cookies)) {
             Ok(auth) => return Ok(auth),
             Err(err) => failures.push(format!("{browser}: {err}")),
         }
@@ -170,9 +160,9 @@ fn extract_chromium(browser: &str, profile: Option<&str>) -> Result<Vec<CookieRe
     #[cfg(not(windows))]
     {
         let _ = (browser, profile);
-        return Err(CliError::Config(
+        Err(CliError::Config(
             "native Chromium cookie extraction is currently implemented for Windows".into(),
-        ));
+        ))
     }
 
     #[cfg(windows)]
@@ -188,13 +178,11 @@ fn extract_chromium(browser: &str, profile: Option<&str>) -> Result<Vec<CookieRe
 
         let conn = open_browser_database(&database)?;
         let meta_version = chromium_meta_version(&conn);
-        let secure_column = chromium_secure_column(&conn)?;
-        let sql = format!(
-            "SELECT host_key, name, value, encrypted_value FROM cookies \
-             WHERE host_key = 'suno.com' OR host_key LIKE '%.suno.com'"
-        );
+        chromium_secure_column(&conn)?;
+        let sql = "SELECT host_key, name, value, encrypted_value FROM cookies \
+                   WHERE host_key = 'suno.com' OR host_key LIKE '%.suno.com'";
         let mut stmt = conn
-            .prepare(&sql)
+            .prepare(sql)
             .map_err(|e| CliError::Config(format!("cannot query Chromium cookies: {e}")))?;
         let rows = stmt
             .query_map([], |row| {
@@ -207,9 +195,6 @@ fn extract_chromium(browser: &str, profile: Option<&str>) -> Result<Vec<CookieRe
             })
             .map_err(|e| CliError::Config(format!("cannot read Chromium cookies: {e}")))?;
 
-        // Touch the discovered secure column so schema drift is detected even
-        // though Suno authentication only needs name/domain/value.
-        let _ = secure_column;
         let decryptor = WindowsChromiumDecryptor::new(&browser_root, meta_version)?;
         let mut cookies = Vec::new();
         let mut undecryptable = 0usize;
@@ -224,15 +209,17 @@ fn extract_chromium(browser: &str, profile: Option<&str>) -> Result<Vec<CookieRe
                 decryptor.decrypt(&encrypted_value)?
             };
             if let Some(value) = value {
-                cookies.push(CookieRecord { domain, name, value });
+                cookies.push(CookieRecord {
+                    domain,
+                    name,
+                    value,
+                });
             } else {
                 undecryptable += 1;
             }
         }
         if undecryptable > 0 {
-            eprintln!(
-                "Warning: {undecryptable} {browser} Suno cookie(s) could not be decrypted"
-            );
+            eprintln!("Warning: {undecryptable} {browser} Suno cookie(s) could not be decrypted");
         }
         Ok(cookies)
     }
@@ -258,7 +245,7 @@ fn chromium_browser_root(browser: &str) -> Result<PathBuf, CliError> {
         _ => {
             return Err(CliError::InvalidInput(format!(
                 "unsupported Chromium browser '{browser}'"
-            )))
+            )));
         }
     };
     Ok(path)
@@ -283,7 +270,7 @@ fn resolve_profile_root(
         return Ok(browser_root.to_path_buf());
     };
     let profile_path = Path::new(profile);
-    if profile_path.is_absolute() || profile.contains(['\\', '/']) {
+    if profile_path.is_absolute() || profile.contains('\\') || profile.contains('/') {
         Ok(profile_path.to_path_buf())
     } else {
         Ok(browser_root.join(profile))
@@ -312,11 +299,14 @@ fn newest_named_file(root: &Path, filename: &str, max_depth: usize) -> Option<Pa
             if file_type.is_dir() {
                 visit(&path, filename, depth + 1, max_depth, best);
             } else if file_type.is_file()
-                && entry.file_name().to_string_lossy().eq_ignore_ascii_case(filename)
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(filename)
             {
                 let modified = entry
                     .metadata()
-                    .and_then(|m| m.modified())
+                    .and_then(|metadata| metadata.modified())
                     .unwrap_or(SystemTime::UNIX_EPOCH);
                 if best.as_ref().is_none_or(|(when, _)| modified > *when) {
                     *best = Some((modified, path));
@@ -333,9 +323,9 @@ fn newest_named_file(root: &Path, filename: &str, max_depth: usize) -> Option<Pa
 fn open_browser_database(path: &Path) -> Result<Connection, CliError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
 
-    // Prefer a direct read-only SQLite snapshot. Unlike yt-dlp's file-copy
-    // approach, this can succeed while Chromium is live when the browser's
-    // Windows file sharing mode permits readers.
+    // Prefer a direct read-only SQLite connection. Unlike yt-dlp's unconditional
+    // file-copy approach, this can succeed while Chromium is live when the
+    // browser's Windows sharing mode permits readers.
     if let Ok(conn) = Connection::open_with_flags(path, flags) {
         let _ = conn.busy_timeout(std::time::Duration::from_millis(750));
         return Ok(conn);
@@ -360,6 +350,7 @@ fn open_browser_database(path: &Path) -> Result<Connection, CliError> {
     Ok(conn)
 }
 
+#[cfg(windows)]
 fn chromium_meta_version(conn: &Connection) -> i64 {
     conn.query_row("SELECT value FROM meta WHERE key = 'version'", [], |row| {
         row.get::<_, String>(0)
@@ -369,6 +360,7 @@ fn chromium_meta_version(conn: &Connection) -> i64 {
     .unwrap_or(0)
 }
 
+#[cfg(windows)]
 fn chromium_secure_column(conn: &Connection) -> Result<&'static str, CliError> {
     let mut stmt = conn
         .prepare("PRAGMA table_info(cookies)")
@@ -414,37 +406,36 @@ impl WindowsChromiumDecryptor {
             let sealed = &encrypted[15..];
             let cipher = Aes256Gcm::new_from_slice(key)
                 .map_err(|_| CliError::Config("invalid Chromium AES key length".into()))?;
-            let plaintext = cipher
-                .decrypt(Nonce::from_slice(nonce), sealed)
-                .map_err(|_| CliError::Config("Chromium AES-GCM cookie decryption failed".into()))?;
+            let Ok(plaintext) = cipher.decrypt(Nonce::from_slice(nonce), sealed) else {
+                return Ok(None);
+            };
             return decode_chromium_plaintext(plaintext, self.meta_version);
         }
 
         if encrypted.starts_with(b"v20") {
-            // Chromium app-bound encryption is intentionally detected rather
-            // than incorrectly treating v20 data as legacy DPAPI.
+            // Chromium app-bound encryption is detected explicitly rather than
+            // being misinterpreted as legacy DPAPI data.
             return Ok(None);
         }
 
-        let plaintext = dpapi_unprotect(encrypted)?;
-        decode_chromium_plaintext(plaintext, self.meta_version)
+        match dpapi_unprotect(encrypted) {
+            Ok(plaintext) => decode_chromium_plaintext(plaintext, self.meta_version),
+            Err(_) => Ok(None),
+        }
     }
 }
 
 #[cfg(windows)]
 fn windows_v10_key(browser_root: &Path) -> Result<Option<Vec<u8>>, CliError> {
-    let local_state = newest_named_file(browser_root, "Local State", 2).ok_or_else(|| {
-        CliError::Config(format!(
-            "could not find Chromium Local State under {}",
-            browser_root.display()
-        ))
-    })?;
+    let Some(local_state) = newest_named_file(browser_root, "Local State", 2) else {
+        return Ok(None);
+    };
     let data = fs::read_to_string(&local_state)?;
     let json: serde_json::Value = serde_json::from_str(&data)?;
     let Some(encoded) = json
         .get("os_crypt")
-        .and_then(|v| v.get("encrypted_key"))
-        .and_then(|v| v.as_str())
+        .and_then(|value| value.get("encrypted_key"))
+        .and_then(|value| value.as_str())
     else {
         return Ok(None);
     };
@@ -478,7 +469,7 @@ fn decode_chromium_plaintext(
 fn dpapi_unprotect(ciphertext: &[u8]) -> Result<Vec<u8>, CliError> {
     use std::ptr::{null, null_mut};
     use std::slice;
-    use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+    use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};
     use windows_sys::Win32::System::Memory::LocalFree;
 
     let mut input = CRYPT_INTEGER_BLOB {
@@ -519,7 +510,7 @@ fn extract_firefox(profile: Option<&str>) -> Result<Vec<CookieRecord>, CliError>
         .filter_map(|root| newest_named_file(root, "cookies.sqlite", 4))
         .max_by_key(|path| {
             fs::metadata(path)
-                .and_then(|m| m.modified())
+                .and_then(|metadata| metadata.modified())
                 .unwrap_or(SystemTime::UNIX_EPOCH)
         })
         .ok_or_else(|| CliError::Config("could not find Firefox cookies.sqlite".into()))?;
@@ -546,7 +537,7 @@ fn extract_firefox(profile: Option<&str>) -> Result<Vec<CookieRecord>, CliError>
 fn firefox_roots(profile: Option<&str>) -> Result<Vec<PathBuf>, CliError> {
     if let Some(profile) = profile {
         let path = Path::new(profile);
-        if path.is_absolute() || profile.contains(['\\', '/']) {
+        if path.is_absolute() || profile.contains('\\') || profile.contains('/') {
             return Ok(vec![path.to_path_buf()]);
         }
     }
@@ -597,7 +588,10 @@ mod tests {
     fn preserves_windows_path_after_first_colon() {
         let spec = parse_browser_spec(r"brave:C:\Users\Admin\BraveProfile").unwrap();
         assert_eq!(spec.browser, "brave");
-        assert_eq!(spec.profile.as_deref(), Some(r"C:\Users\Admin\BraveProfile"));
+        assert_eq!(
+            spec.profile.as_deref(),
+            Some(r"C:\Users\Admin\BraveProfile")
+        );
     }
 
     #[test]
