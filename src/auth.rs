@@ -8,6 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::errors::CliError;
 
+#[path = "native_browser_cookies.rs"]
+mod native_browser_cookies;
+
 const CLERK_BASE: &str = "https://auth.suno.com";
 const CLERK_JS_VERSION: &str = "5.117.0";
 const CLERK_API_VERSION: &str = "2025-11-10";
@@ -233,7 +236,8 @@ pub fn browser_token() -> String {
 }
 
 /// Extract Suno auth cookies from the user's browsers.
-/// Tries Chrome, Firefox, Safari, Arc, Brave, Edge in order.
+/// Tries the existing rookie extractor first, then the native Rust port of
+/// yt-dlp's browser-cookie extraction logic.
 pub fn extract_browser_auth() -> Result<BrowserAuth, CliError> {
     let domains = vec![
         "suno.com".into(),
@@ -286,9 +290,11 @@ pub fn extract_browser_auth() -> Result<BrowserAuth, CliError> {
         }
     }
 
-    Err(CliError::Config(
-        "No Suno session found in any browser. Log into suno.com first, then retry.".into(),
-    ))
+    native_browser_cookies::extract_browser_auth(None).map_err(|native_err| {
+        CliError::Config(format!(
+            "No Suno session found through the native browser extractors. {native_err}"
+        ))
+    })
 }
 
 /// Exchange the __client cookie for a session ID and JWT via Clerk.
