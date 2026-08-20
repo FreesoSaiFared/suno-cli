@@ -1,0 +1,142 @@
+name: Internal VM compact closure
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stage-compact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Record pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bundle/src bundle/receipts bundle/packages
+          cat > bundle/receipts/PINS.txt <<'EOF'
+          yt-dlp/yt-dlp 3a08beaf031ab68f966401ead017ac81fe8486cf Release 2026.08.19
+          paperfoot/suno-cli f0dea4d4e0ef998a508e73f05749eb2b138a253d upstream v0.9 tree
+          FreesoSaiFared/suno-cli f7a029e24be7fd027870b8771556d2b60dd2aeac upload fusion
+          EOF
+
+      - name: Retrieve pinned sources through gh-proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          fetch() {
+            local name="$1" url="$2"
+            curl -fL --retry 5 --retry-all-errors --connect-timeout 20 \
+              "https://gh-proxy.com/${url}" -o "/tmp/${name}.tar.gz"
+            sha256sum "/tmp/${name}.tar.gz" | tee -a bundle/receipts/SOURCE_ARCHIVE_SHA256SUMS
+            tar -xzf "/tmp/${name}.tar.gz" -C bundle/src
+          }
+          fetch yt-dlp https://github.com/yt-dlp/yt-dlp/archive/3a08beaf031ab68f966401ead017ac81fe8486cf.tar.gz
+          fetch suno-upstream https://github.com/paperfoot/suno-cli/archive/f0dea4d4e0ef998a508e73f05749eb2b138a253d.tar.gz
+          fetch suno-freeso https://github.com/FreesoSaiFared/suno-cli/archive/f7a029e24be7fd027870b8771556d2b60dd2aeac.tar.gz
+          mv bundle/src/yt-dlp-* bundle/src/yt-dlp
+          mv bundle/src/suno-cli-f0dea4d4e0ef998a508e73f05749eb2b138a253d bundle/src/suno-cli-upstream
+          mv bundle/src/suno-cli-f7a029e24be7fd027870b8771556d2b60dd2aeac bundle/src/suno-cli-freeso
+
+      - name: Prove yt-dlp and Freeso upload tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd bundle/src/yt-dlp
+          python -m compileall -q yt_dlp
+          PYTHONPATH=. python -m yt_dlp --version | tee ../../receipts/yt-dlp-version.txt
+          cd ../suno-cli-freeso
+          rustc --version --verbose | tee ../../receipts/rustc-version.txt
+          cargo --version | tee ../../receipts/cargo-version.txt
+          cargo fmt --all -- --check
+          cargo test --all-targets 2>&1 | tee ../../receipts/cargo-test.txt
+          cargo clippy --all-targets -- -D warnings 2>&1 | tee ../../receipts/cargo-clippy.txt
+          cargo run --quiet -- upload --help > ../../receipts/suno-upload-help.txt
+          cargo run --quiet -- init-clip --help > ../../receipts/suno-init-clip-help.txt
+          cargo run --quiet -- agent-info > ../../receipts/suno-agent-info.json
+          grep -nE 'upload_audio_init|upload_audio_to_s3|upload_audio_finish|upload_audio_status|initialize_clip|/api/uploads/audio/' src/api/upload.rs > ../../receipts/upload-api-wiring.txt
+          grep -nE 'Commands::Upload|Commands::InitClip|Upload\(|InitClip\(' src/main.rs src/cli.rs > ../../receipts/upload-cli-wiring.txt
+
+      - name: Vendor Rust crates and compact them
+        shell: bash
+        working-directory: bundle/src/suno-cli-freeso
+        run: |
+          set -euo pipefail
+          mkdir -p .cargo
+          cargo vendor vendor > .cargo/config.toml
+          cargo metadata --offline --format-version 1 --no-deps > ../../receipts/cargo-metadata-offline.json
+          tar -I 'zstd -T0 -10' -cf ../../packages/rust-vendor.tar.zst vendor
+          sha256sum ../../packages/rust-vendor.tar.zst >> ../../receipts/PACKAGE_SHA256SUMS
+          rm -rf vendor target
+
+      - name: Package portable Rust sysroot
+        shell: bash
+        run: |
+          set -euo pipefail
+          SYSROOT="$(rustc --print sysroot)"
+          echo "$SYSROOT" > bundle/receipts/rust-sysroot-source.txt
+          tar -C "$(dirname "$SYSROOT")" -I 'zstd -T0 -10' \
+            -cf bundle/packages/rust-toolchain-x86_64-linux.tar.zst "$(basename "$SYSROOT")"
+          sha256sum bundle/packages/rust-toolchain-x86_64-linux.tar.zst >> bundle/receipts/PACKAGE_SHA256SUMS
+
+      - name: Write VM activation and receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > bundle/VM_ACTIVATE.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          BUNDLE="$(cd "$(dirname "$0")" && pwd)"
+          ROOT="${1:-/opt/dev/suno-workbench}"
+          mkdir -p "$ROOT"
+          cp -a "$BUNDLE/src/." "$ROOT/"
+          mkdir -p "$ROOT/rust-toolchain"
+          tar --zstd -xf "$BUNDLE/packages/rust-toolchain-x86_64-linux.tar.zst" -C "$ROOT/rust-toolchain" --strip-components=1
+          tar --zstd -xf "$BUNDLE/packages/rust-vendor.tar.zst" -C "$ROOT/suno-cli-freeso"
+          mkdir -p "$ROOT/.state/config" "$ROOT/.state/data"
+          cat > "$ROOT/env.sh" <<ENV
+          export PATH="$ROOT/rust-toolchain/bin:\$PATH"
+          export CARGO_NET_OFFLINE=true
+          export SUNO_CONFIG_DIR="$ROOT/.state/config"
+          export SUNO_DATA_DIR="$ROOT/.state/data"
+          ENV
+          echo "source $ROOT/env.sh"
+          EOF
+          chmod +x bundle/VM_ACTIVATE.sh
+          cat > bundle/receipts/README.txt <<'EOF'
+          Offline development closure. No Suno credentials are included.
+          Source archives were retrieved through gh-proxy at pinned SHAs.
+          Activate with: ./VM_ACTIVATE.sh /opt/dev/suno-workbench
+          Then: source /opt/dev/suno-workbench/env.sh
+          EOF
+
+      - name: Upload sources and receipts
+        uses: actions/upload-artifact@v4
+        with:
+          name: internal-vm-sources
+          path: |
+            bundle/src
+            bundle/receipts
+            bundle/VM_ACTIVATE.sh
+          compression-level: 6
+          retention-days: 7
+
+      - name: Upload vendored Rust crates
+        uses: actions/upload-artifact@v4
+        with:
+          name: internal-vm-rust-vendor
+          path: bundle/packages/rust-vendor.tar.zst
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Rust toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: internal-vm-rust-toolchain
+          path: bundle/packages/rust-toolchain-x86_64-linux.tar.zst
+          compression-level: 0
+          retention-days: 7
