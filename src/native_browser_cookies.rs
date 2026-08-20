@@ -49,7 +49,9 @@ pub fn extract_browser_auth(spec: Option<&str>) -> Result<BrowserAuth, CliError>
             browser: browser.to_string(),
             profile: None,
         };
-        match extract_for_spec(&parsed).and_then(|cookies| records_to_browser_auth(browser, cookies)) {
+        match extract_for_spec(&parsed)
+            .and_then(|cookies| records_to_browser_auth(browser, cookies))
+        {
             Ok(auth) => return Ok(auth),
             Err(err) => failures.push(format!("{browser}: {err}")),
         }
